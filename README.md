@@ -1,0 +1,234 @@
+# OBS Explorer
+
+一个运行在本机的 OBS 对象浏览界面。它直接调用本机已配置好的 `obsutil`，可以浏览桶、逐级查看前缀、搜索和过滤对象，并预览 JSON / 文本 / 图片等文件。
+
+![OBS Explorer](docs/preview.png)
+
+## 前置条件
+
+项目本身不包含 OBS 凭据，也不会绕过 `obsutil` 访问 OBS。运行前需要：
+
+1. **Node.js 20+**
+2. **安装 obsutil**
+   - 官方下载与安装说明：<https://support.huaweicloud.com/utiltg-obs/obs_11_0003.html>
+   - 安装后确认命令可用：
+
+     ```bash
+     obsutil version
+     ```
+
+3. **配置 obsutil**
+   - 使用交互式配置：
+
+     ```bash
+     obsutil config -interactive
+     ```
+
+   - 或直接指定 endpoint / AK / SK（endpoint 需要和桶所在地域一致）：
+
+     ```bash
+     obsutil config \
+       -e=https://obs.cn-east-4.myhuaweicloud.com \
+       -i="<your-access-key-id>" \
+       -k="<your-secret-access-key>"
+     ```
+
+   - 验证能否访问 OBS：
+
+     ```bash
+     obsutil ls
+     obsutil ls obs://your-bucket/
+     ```
+
+   - 如果 `obsutil` 不在 `PATH` 中，在 `.env` 里通过 `OBSUTIL_BIN` 指定绝对路径。
+   - 如果配置文件不在默认的 `~/.obsutilconfig`，通过 `OBSUTIL_CONFIG` 指定路径。
+   - `obsutil` 默认还会使用 `~/.obsutilAppData/` 保存凭据加密数据；服务启动时会把配置文件和该目录一起复制到隔离的临时运行目录。
+
+> `.env` 管理的是本项目的运行参数。OBS 的 AK/SK 仍由 `obsutil` 自己的配置文件管理，不需要、也不建议写进前端；如需使用自定义配置文件，把 `OBSUTIL_CONFIG` 指向该文件即可。
+
+## 快速开始
+
+```bash
+cp .env.example .env
+# 按需编辑 .env
+npm start
+```
+
+打开 <http://127.0.0.1:4318>。
+
+默认会打开这个目录（可在 `.env` 中修改）：
+
+```text
+obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_frontend_scientific_mechanism_oc/task_configs/
+```
+
+## 配置：`.env`
+
+服务启动时会自动读取项目根目录下的 `.env`。已经通过 shell 设置的环境变量优先级更高，不会被 `.env` 覆盖。
+
+仓库提供了 [`.env.example`](.env.example)，可以直接复制：
+
+```bash
+cp .env.example .env
+```
+
+示例：
+
+```dotenv
+PORT=4318
+HOST=127.0.0.1
+
+OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_frontend_scientific_mechanism_oc/task_configs/
+
+# 可选：obsutil 可执行文件绝对路径
+# OBSUTIL_BIN=/opt/homebrew/bin/obsutil
+
+# 可选：自定义 obsutil 配置文件路径
+# OBSUTIL_CONFIG=/Users/you/.obsutilconfig
+
+# 可选：上传、搜索、批量操作限制
+# OBS_MAX_UPLOAD_BYTES=536870912
+# OBS_SEARCH_MAX_RESULTS=300
+# OBS_SEARCH_MAX_SCAN=20000
+# OBS_SEARCH_MAX_PAGES=200
+# OBS_BATCH_MAX_ITEMS=200
+# OBS_BATCH_CONCURRENCY=4
+```
+
+`.env` 已加入 `.gitignore`，不要把它提交到仓库。
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `PORT` | 本地监听端口 | `4318` |
+| `HOST` | 监听地址 | `127.0.0.1` |
+| `OBS_DEFAULT_PATH` | 打开页面时显示的默认目录 | 上面的 task_configs 路径 |
+| `OBSUTIL_BIN` | obsutil 可执行文件或绝对路径 | `obsutil` |
+| `OBSUTIL_CONFIG` | 自定义 obsutil 配置文件 | `~/.obsutilconfig` |
+| `OBS_SEARCH_MAX_RESULTS` | 递归搜索最多返回结果数 | `300` |
+| `OBS_SEARCH_MAX_SCAN` | 递归搜索最多扫描对象数 | `20000` |
+| `OBS_SEARCH_MAX_PAGES` | 递归搜索最多请求页数 | `200` |
+| `OBS_MAX_UPLOAD_BYTES` | 单文件上传大小上限（字节） | `536870912`（512 MB） |
+| `OBS_BATCH_MAX_ITEMS` | 单次批量操作最多对象数 | `200` |
+| `OBS_BATCH_CONCURRENCY` | 批量操作并发数 | `4` |
+
+## 功能
+
+- 地址栏面包屑、返回上级、手动输入任意 `obs://` 路径
+- 存储桶列表、存储桶筛选、最近访问、固定常用路径
+- 文件夹逐级浏览，对象大小 / 修改时间 / 存储类型 / ETag
+- 当前目录搜索、按文件夹 / 对象过滤、按名称 / 大小 / 时间排序
+- **递归文件名搜索**：在当前目录及所有子目录中匹配文件名，支持 `*` / `?` 通配符、实时进度、停止和结果路径展示
+- 新建文件夹、拖拽/选择上传文件、覆盖同名对象、删除对象或递归删除文件夹
+- **批量操作**：勾选多个对象后移动到、拷贝到或批量删除，带目标冲突检查、实时进度和取消
+- 分页加载更多（每页 200 项）
+- JSON 格式化高亮、原始内容切换、文本行号、图片 / PDF / 音视频内联预览
+- 对象详情、复制路径、复制临时签名链接、下载对象
+- 响应式布局，移动端使用抽屉式导航
+- 所有凭据只留在本地服务端，不会发送给浏览器
+
+## 递归搜索
+
+点击搜索框右侧的「递归」按钮，输入文件名后按 Enter：
+
+- 搜索范围是当前 OBS 目录及所有子目录
+- 支持 `*.json`、`MAP_?inux.json` 这样的通配符
+- 结果流式返回，页面显示已扫描对象数和匹配数
+- 可以随时点击「停止」，不会继续消耗 obsutil 请求
+- 服务端限制默认最多返回 300 条、扫描 20,000 个对象，避免误操作产生过大的请求量
+
+![递归搜索](docs/recursive-search.png)
+
+由于 OBS 和 obsutil 都不支持按对象 basename 做服务端过滤，递归搜索本质上仍是分页遍历前缀后本地匹配，目录特别大时需要一定时间。
+
+## 批量操作
+
+表格最左侧增加勾选列，可以单选或通过表头复选框选择当前列表中的全部文件。
+
+选中后会出现批量操作栏：
+
+- **移动到**：输入目标 `obs://.../` 目录，批量执行 `obsutil mv`
+- **拷贝到**：输入目标目录，批量执行 `obsutil cp`
+- **删除**：二次确认后批量执行 `obsutil rm`
+- 目标目录中如果存在同名对象，会在开始前中止操作，不会静默覆盖
+- 操作实时显示进度，可中途取消；已经处理的对象不会回滚
+
+单次默认最多处理 200 个文件，目标冲突检查与处理过程通过流式接口回传。
+
+![批量操作](docs/batch-operations.png)
+
+## 文件管理
+
+工具栏右侧提供「上传」和「新建文件夹」；每一行的操作区提供删除按钮。
+
+- **新建文件夹**：只允许在当前目录下创建单层文件夹，同名文件夹会提示已存在
+- **上传文件**：支持多选和拖拽上传，显示上传进度；默认不覆盖同名对象，可勾选「覆盖同名对象」
+- **删除**：对象删除需要确认；文件夹删除需要勾选递归删除确认，以免误删整个目录
+- 上传和删除通过本地 Node 服务调用 `obsutil cp` / `obsutil rm`，浏览器不接触 AK/SK
+
+![文件管理](docs/file-management.png)
+
+## 开发模式
+
+```bash
+npm run dev
+```
+
+`dev` 使用 `node --watch server.mjs`，修改服务端或前端静态文件后会自动重载。前端静态资源本身也会在刷新时重新校验缓存。
+
+## 实现说明
+
+- 后端是零依赖的 Node.js HTTP 服务，所有 obsutil 命令通过 `spawn` 参数数组执行，不经过 shell。
+- `.env` 由内置解析器读取，不引入 dotenv 依赖，也不会覆盖已存在的 shell 环境变量。
+- 列表接口使用 `obsutil ls <prefix> -d -bf=raw`，解析文件夹、对象元数据和 `Next marker` 实现分页。
+- 递归搜索使用 `obsutil ls <prefix> -s` 按 `Next marker` 分页遍历，服务端实时通过 NDJSON 推送进度和匹配结果；客户端关闭连接或点击停止时会终止当前 obsutil 子进程。
+- 文本预览使用 `obsutil cat`；图片、PDF、音视频通过 `obsutil sign` 生成短时签名 URL 后由浏览器加载；下载由本地服务流式代理，并强制 `Content-Disposition: attachment`。
+- 服务启动时会把 obsutil 配置和 `.obsutilAppData` 复制到一个权限为 `0700` 的临时目录，并将日志重定向到该目录，避免污染用户目录，也能在受限沙箱中运行。临时目录在服务正常退出时清理。
+- 服务默认仅监听 `127.0.0.1`，并校验所有路径，拒绝 shell 注入、`..` 路径穿越和非 `obs://` 协议。
+- 写操作要求同源请求；删除接口额外要求 `confirm: true`，且禁止通过该接口删除整个存储桶。
+- 上传文件先流式写入系统临时目录，再调用 `obsutil cp`，临时文件会在请求结束后删除；上传大小受限。
+- 批量移动/拷贝会先检查目标目录冲突，再通过 NDJSON 流推送每个对象的处理进度；批量任务使用 `obsutil mv` / `obsutil cp` / `obsutil rm`，支持中断当前子进程。
+
+## 常见问题
+
+### `obsutil: command not found`
+
+确认安装目录已加入 `PATH`，或在 `.env` 中设置：
+
+```dotenv
+OBSUTIL_BIN=/absolute/path/to/obsutil
+```
+
+### 页面显示连接异常 / 无法列出桶
+
+先在终端确认以下命令能正常执行：
+
+```bash
+obsutil version
+obsutil ls
+```
+
+如果 `obsutil` 默认配置文件不在 `~/.obsutilconfig`，在 `.env` 中设置 `OBSUTIL_CONFIG`。
+
+### 端口被占用
+
+修改 `.env`：
+
+```dotenv
+PORT=4319
+```
+
+然后重新执行 `npm start`。
+
+### 为什么 `.env` 里没有 AK/SK
+
+AK/SK 由 `obsutil` 管理，服务启动时复制的是 `obsutil` 的配置与本地加密数据。这样浏览器端不会接触凭据，也不需要在前端或 `.env` 中重复保存密钥。
+
+## 测试
+
+```bash
+npm test
+```
+
+测试覆盖 `.env` 解析、`obsutil ls` / `stat` / 桶列表输出解析、分页 marker、大小换算和文件类型识别。

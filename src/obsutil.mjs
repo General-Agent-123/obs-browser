@@ -1,0 +1,710 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+const META_RE =
+  /^\s+(\d{4}-\d{2}-\d{2}T\S+)\s+(\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB|PB))\s+(\S+)\s+"?([^"\s]+)"?\s*$/i;
+
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'rst', 'log', 'csv', 'tsv', 'json', 'jsonl',
+  'ndjson', 'yaml', 'yml', 'toml', 'ini', 'conf', 'cfg', 'env', 'xml', 'html',
+  'htm', 'css', 'scss', 'sass', 'less', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx',
+  'vue', 'svelte', 'py', 'pyi', 'sh', 'bash', 'zsh', 'fish', 'rb', 'go', 'rs',
+  'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'swift', 'm',
+  'mm', 'sql', 'graphql', 'gql', 'dockerfile', 'makefile', 'tf', 'hcl', 'r',
+  'jl', 'lua', 'pl', 'ex', 'exs', 'clj', 'scala', 'gradle', 'properties', 'gitignore',
+]);
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'ico']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac']);
+
+export function stripLogNoise(value = '') {
+  return String(value)
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .filter((line) => !/^Error: open .*\.obsutil_log\/[^ ]+: (?:operation not permitted|permission denied)$/i.test(line.trim()))
+    .filter((line) => !/^Start at \d{4}-\d{2}-\d{2}[ T]/.test(line.trim()))
+    .join('\n');
+}
+
+export function humanToBytes(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const match = String(value ?? '').trim().match(/^([\d.]+)\s*([KMGTPE]?)(?:i?B)?$/i);
+  if (!match) return 0;
+  const amount = Number.parseFloat(match[1]);
+  const unit = match[2].toUpperCase();
+  const power = { '': 0, K: 1, M: 2, G: 3, T: 4, P: 5, E: 6 }[unit] ?? 0;
+  return Math.round(amount * 1024 ** power);
+}
+
+export function extensionOf(name = '') {
+  const clean = String(name).toLowerCase().replace(/\/$/, '');
+  const base = clean.split('/').pop() ?? '';
+  if (!base.includes('.')) return base === 'dockerfile' ? 'dockerfile' : '';
+  return base.split('.').pop() ?? '';
+}
+
+export function classifyObject(name, contentType = '') {
+  const ext = extensionOf(name);
+  const mime = String(contentType).toLowerCase().split(';')[0].trim();
+
+  if (mime === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (mime.startsWith('image/') || IMAGE_EXTENSIONS.has(ext)) return 'image';
+  if (mime.startsWith('video/') || VIDEO_EXTENSIONS.has(ext)) return 'video';
+  if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.has(ext)) return 'audio';
+  if (ext === 'json' || ext === 'jsonl' || ext === 'ndjson' || mime.includes('json')) return 'json';
+  if (mime.startsWith('text/') || TEXT_EXTENSIONS.has(ext)) return 'text';
+  return null;
+}
+
+export function parseNextMarker(output) {
+  const match = stripLogNoise(output).match(/^Next marker is:\s*(.+?)\s*$/m);
+  return match ? match[1] : null;
+}
+
+export function parseListOutput(output) {
+  const clean = stripLogNoise(output);
+  const folderHeader = clean.indexOf('Folder list:');
+  const objectHeader = clean.indexOf('Object list:');
+  const folderCountMatch = clean.match(/^Folder number:\s*(\d+)/m);
+  const fileCountMatch = clean.match(/^File number:\s*(\d+)/m);
+
+  let folderBlock = '';
+  let objectBlock = '';
+
+  if (objectHeader !== -1) {
+    folderBlock = folderHeader !== -1 ? clean.slice(folderHeader + 'Folder list:'.length, objectHeader) : '';
+    objectBlock = clean.slice(objectHeader + 'Object list:'.length);
+  } else if (folderHeader !== -1) {
+    folderBlock = clean.slice(folderHeader + 'Folder list:'.length);
+  }
+
+  objectBlock = objectBlock.split(/\n(?:Next marker is:|Folder number:|File number:)/)[0];
+
+  const folders = [];
+  const seenFolders = new Set();
+  for (const line of folderBlock.split('\n')) {
+    const value = line.trim();
+    if (!value.startsWith('obs://') || !value.endsWith('/')) continue;
+    if (seenFolders.has(value)) continue;
+    seenFolders.add(value);
+    const withoutSlash = value.slice(0, -1);
+    const name = withoutSlash.split('/').pop() ?? withoutSlash;
+    folders.push({
+      type: 'folder',
+      name,
+      path: value,
+      ext: '',
+    });
+  }
+
+  const objects = [];
+  const seenObjects = new Set();
+  const lines = objectBlock.split('\n');
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.startsWith('obs://')) continue;
+
+    let key = line.trimEnd();
+    let meta = null;
+    let cursor = index + 1;
+
+    while (cursor < lines.length && !lines[cursor].startsWith('obs://')) {
+      const candidate = lines[cursor];
+      const match = candidate.match(META_RE);
+      if (match) {
+        meta = match;
+        cursor += 1;
+        break;
+      }
+      if (!candidate.trim()) {
+        cursor += 1;
+        if (meta) break;
+        continue;
+      }
+      // obsutil wraps exceptionally long keys onto indented continuation lines.
+      if (/^\s{2,}\S/.test(candidate)) {
+        key += candidate.trim();
+        cursor += 1;
+        continue;
+      }
+      break;
+    }
+
+    const cleanKey = key.trim();
+    if (!cleanKey || seenObjects.has(cleanKey)) {
+      index = Math.max(index, cursor - 1);
+      continue;
+    }
+    seenObjects.add(cleanKey);
+
+    const withoutSlash = cleanKey.endsWith('/') ? cleanKey.slice(0, -1) : cleanKey;
+    const name = withoutSlash.split('/').pop() ?? withoutSlash;
+    const modified = meta?.[1] ?? null;
+    const sizeLabel = meta?.[2] ?? null;
+    const sizeBytes = meta ? humanToBytes(meta[2]) : null;
+    const storageClass = meta?.[3] ?? null;
+    const etag = meta?.[4] ?? null;
+
+    objects.push({
+      type: 'file',
+      name,
+      path: cleanKey,
+      ext: extensionOf(name),
+      sizeBytes,
+      sizeLabel,
+      modified,
+      storageClass,
+      etag,
+    });
+
+    index = Math.max(index, cursor - 1);
+  }
+
+  return {
+    folders,
+    objects,
+    nextMarker: parseNextMarker(clean),
+    reportedFolderCount: folderCountMatch ? Number(folderCountMatch[1]) : null,
+    reportedFileCount: fileCountMatch ? Number(fileCountMatch[1]) : null,
+  };
+}
+
+export function parseBriefListOutput(output) {
+  const clean = stripLogNoise(output);
+  const objectHeader = clean.indexOf('Object list:');
+  if (objectHeader === -1) {
+    return { objects: [], nextMarker: parseNextMarker(clean) };
+  }
+
+  let objectBlock = clean.slice(objectHeader + 'Object list:'.length);
+  objectBlock = objectBlock.split(/\n(?:Next marker is:|Folder number:|File number:)/)[0];
+
+  const objects = [];
+  const seen = new Set();
+  for (const line of objectBlock.split('\n')) {
+    const value = line.trim();
+    if (!value.startsWith('obs://') || value.endsWith('/') || seen.has(value)) continue;
+    seen.add(value);
+    const name = value.split('/').pop() ?? value;
+    objects.push({
+      type: 'file',
+      name,
+      path: value,
+      ext: extensionOf(name),
+    });
+  }
+
+  return { objects, nextMarker: parseNextMarker(clean) };
+}
+
+export function compileFilenameMatcher(query) {
+  const value = String(query || '').trim();
+  if (!value) return () => false;
+
+  if (value.includes('*') || value.includes('?')) {
+    const pattern = value
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replaceAll('*', '.*')
+      .replaceAll('?', '.');
+    const regex = new RegExp(`^${pattern}$`, 'i');
+    return (name) => regex.test(String(name));
+  }
+
+  const needle = value.toLowerCase();
+  return (name) => String(name).toLowerCase().includes(needle);
+}
+
+export function parseStatOutput(output) {
+  const clean = stripLogNoise(output);
+  const lines = clean.split('\n');
+  const fields = {};
+  let currentKey = null;
+
+  for (const line of lines) {
+    const label = line.match(/^([A-Za-z][A-Za-z0-9 _-]*):\s*$/);
+    if (label) {
+      currentKey = label[1];
+      continue;
+    }
+    if (currentKey && line.trim()) {
+      fields[currentKey] = line.trim();
+      currentKey = null;
+    }
+  }
+
+  const key = fields.Key ?? '';
+  const name = key.replace(/\/$/, '').split('/').pop() ?? key;
+  const sizeLabel = fields.Size ?? null;
+
+  return {
+    key,
+    name,
+    type: (fields.Type ?? 'file').toLowerCase(),
+    sizeBytes: sizeLabel ? humanToBytes(sizeLabel) : null,
+    sizeLabel,
+    modified: fields.LastModified ?? null,
+    storageClass: fields.StorageClass ?? null,
+    etag: fields.ETag ?? null,
+    contentType: fields.ContentType ?? null,
+    metadata: Object.fromEntries(
+      Object.entries(fields).filter(([field]) => !['Key', 'LastModified', 'Size', 'StorageClass', 'ETag', 'ContentType', 'Type', 'ACL'].includes(field)),
+    ),
+  };
+}
+
+export function parseBuckets(output) {
+  const clean = stripLogNoise(output);
+  const lines = clean.split('\n');
+  const buckets = [];
+  const seen = new Set();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const match = line.match(/^(\s*)(obs:\/\/\S+)(.*)$/);
+    if (!match || match[1].length > 0) continue;
+    const cloudUrl = match[2];
+    if (seen.has(cloudUrl)) continue;
+    seen.add(cloudUrl);
+
+    let rest = match[3].trim();
+    let cursor = index + 1;
+    if (!rest) {
+      while (cursor < lines.length && !lines[cursor].trim()) cursor += 1;
+      if (cursor < lines.length && !lines[cursor].startsWith('obs://')) {
+        rest = lines[cursor].trim();
+      }
+    }
+
+    const date = rest.match(/\d{4}-\d{2}-\d{2}T\S+/)?.[0] ?? null;
+    const region = rest.match(/\b(cn|ap|af|sa|na|eu|me|la)-[a-z0-9-]+-\d+\b/)?.[0] ?? null;
+    const type = rest.match(/\b(OBJECT|POSIX|SAN)\b/)?.[0] ?? 'OBJECT';
+    buckets.push({
+      name: cloudUrl.slice('obs://'.length),
+      path: `${cloudUrl}/`,
+      region,
+      createdAt: date,
+      type,
+    });
+  }
+
+  return buckets;
+}
+
+export function parseVersion(output) {
+  const clean = stripLogNoise(output);
+  return {
+    version: clean.match(/obsutil version:\s*([\w.-]+)/i)?.[1] ?? null,
+    sdkVersion: clean.match(/obssdk version:\s*([\w.-]+)/i)?.[1] ?? null,
+    platform: clean.match(/operating system:\s*([^,\n]+),\s*arch:\s*([^\s\n]+)/i)
+      ? `${clean.match(/operating system:\s*([^,\n]+)/i)[1].trim()} ${clean.match(/arch:\s*([^\s\n]+)/i)[1].trim()}`
+      : null,
+  };
+}
+
+function cleanError(stdout, stderr, fallback) {
+  const lines = stripLogNoise(`${stdout}\n${stderr}`)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^Listing objects\b/i.test(line))
+    .filter((line) => !/^Folder number:/i.test(line) && !/^File number:/i.test(line));
+
+  const explicit = lines.filter((line) => /^Error\b/i.test(line));
+  const source = explicit.length ? explicit : lines.slice(-4);
+  const message = source.join('\n').slice(0, 2000);
+  return message || fallback;
+}
+
+function rewriteManagedConfig(raw, { logDir }) {
+  const overrides = {
+    sdkLogPath: path.join(logDir, 'obssdk.log'),
+    utilLogPath: path.join(logDir, 'obsutil.log'),
+    sdkLogLevel: 'ERROR',
+    utilLogLevel: 'ERROR',
+    sdkLogBackups: '1',
+    utilLogBackups: '1',
+    showProgressBar: 'false',
+    showStartTime: 'false',
+    humanReadableFormat: 'true',
+  };
+  const seen = new Set();
+  const output = [];
+
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z0-9_]+)\s*=/);
+    if (match && Object.hasOwn(overrides, match[1])) {
+      output.push(`${match[1]}=${overrides[match[1]]}`);
+      seen.add(match[1]);
+    } else {
+      output.push(line);
+    }
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (!seen.has(key)) output.push(`${key}=${value}`);
+  }
+  return `${output.join('\n').replace(/\n+$/, '')}\n`;
+}
+
+function endpointFromConfig(raw) {
+  const endpoint = raw.match(/^\s*endpoint\s*=\s*(\S+)/m)?.[1];
+  if (!endpoint) return null;
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return endpoint.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  }
+}
+
+async function exists(target) {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function createObsRuntime({ configPath } = {}) {
+  const sourceConfig = configPath || process.env.OBSUTIL_CONFIG || path.join(os.homedir(), '.obsutilconfig');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'obs-explorer-'));
+  await fs.chmod(root, 0o700).catch(() => {});
+  const logDir = path.join(root, 'logs');
+  await fs.mkdir(logDir, { recursive: true, mode: 0o700 });
+
+  try {
+    const raw = await fs.readFile(sourceConfig, 'utf8');
+    const endpoint = endpointFromConfig(raw);
+    const appDataCandidates = [
+      path.join(path.dirname(sourceConfig), '.obsutilAppData'),
+      path.join(os.homedir(), '.obsutilAppData'),
+    ];
+    const sourceAppData = await (async () => {
+      for (const candidate of appDataCandidates) {
+        if (await exists(candidate)) return candidate;
+      }
+      return null;
+    })();
+
+    if (!sourceAppData) {
+      await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+      return {
+        root: null,
+        configPath: null,
+        logDir: null,
+        endpoint,
+        managed: false,
+        sourceConfig,
+      };
+    }
+
+    await fs.cp(sourceAppData, path.join(root, '.obsutilAppData'), { recursive: true, force: true });
+
+    const managedConfigPath = path.join(root, 'obsutil.conf');
+    await fs.writeFile(managedConfigPath, rewriteManagedConfig(raw, { logDir }), { mode: 0o600 });
+    await fs.chmod(managedConfigPath, 0o600);
+    return {
+      root,
+      configPath: managedConfigPath,
+      logDir,
+      endpoint,
+      managed: true,
+      sourceConfig,
+    };
+  } catch {
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+    return {
+      root: null,
+      configPath: null,
+      logDir: null,
+      endpoint: null,
+      managed: false,
+      sourceConfig,
+    };
+  }
+}
+
+export class ObsutilError extends Error {
+  constructor(message, { code = null, timedOut = false, aborted = false } = {}) {
+    super(message);
+    this.name = 'ObsutilError';
+    this.code = code;
+    this.timedOut = timedOut;
+    this.aborted = aborted;
+  }
+}
+
+export class ObsutilService {
+  constructor({ bin = process.env.OBSUTIL_BIN || 'obsutil', configPath = null, cwd = process.cwd() } = {}) {
+    this.bin = bin;
+    this.configPath = configPath;
+    this.cwd = cwd;
+    this.bucketCache = null;
+    this.bucketCacheAt = 0;
+    this.versionCache = null;
+  }
+
+  async run(args, { timeoutMs = 60_000, maxBytes = 24 * 1024 * 1024, signal = null } = {}) {
+    const finalArgs = [...args];
+    if (this.configPath) finalArgs.push(`-config=${this.configPath}`);
+    if (signal?.aborted) throw new ObsutilError('操作已取消', { aborted: true });
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timedOut = false;
+      let aborted = false;
+      let stdout = '';
+      let stderr = '';
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let child;
+
+      try {
+        child = spawn(this.bin, finalArgs, {
+          cwd: this.cwd,
+          env: { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (error) {
+        reject(new ObsutilError(`无法启动 obsutil：${error.message}`));
+        return;
+      }
+
+      const onAbort = () => {
+        aborted = true;
+        child.kill('SIGKILL');
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, timeoutMs);
+
+      const finish = (callback) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        callback();
+      };
+
+      child.stdout.on('data', (chunk) => {
+        stdoutBytes += chunk.length;
+        if (stdoutBytes > maxBytes) {
+          child.kill('SIGKILL');
+          return;
+        }
+        stdout += chunk.toString('utf8');
+      });
+      child.stderr.on('data', (chunk) => {
+        stderrBytes += chunk.length;
+        if (stderrBytes <= 2 * 1024 * 1024) stderr += chunk.toString('utf8');
+      });
+      child.on('error', (error) => {
+        finish(() => reject(new ObsutilError(`无法启动 obsutil：${error.message}`)));
+      });
+      child.on('close', (code) => {
+        finish(() => {
+          if (aborted) {
+            reject(new ObsutilError('操作已取消', { code, aborted: true }));
+            return;
+          }
+          if (timedOut) {
+            reject(new ObsutilError(`obsutil 执行超时（${Math.round(timeoutMs / 1000)} 秒）`, { code, timedOut: true }));
+            return;
+          }
+          if (stdoutBytes > maxBytes) {
+            reject(new ObsutilError('obsutil 返回内容过大'));
+            return;
+          }
+          if (code !== 0) {
+            reject(new ObsutilError(cleanError(stdout, stderr, `obsutil 退出码 ${code}`), { code }));
+            return;
+          }
+          resolve({ stdout, stderr, code });
+        });
+      });
+    });
+  }
+
+  async version() {
+    if (this.versionCache) return this.versionCache;
+    const { stdout, stderr } = await this.run(['version'], { timeoutMs: 20_000, maxBytes: 1_000_000 });
+    this.versionCache = parseVersion(`${stdout}\n${stderr}`);
+    return this.versionCache;
+  }
+
+  async list(folderPath, { marker = null, limit = 200 } = {}) {
+    const safeLimit = Math.min(1000, Math.max(1, Number.parseInt(limit, 10) || 200));
+    const args = ['ls', folderPath, '-d', '-bf=raw', `-limit=${safeLimit}`];
+    if (marker) args.push(`-marker=${marker}`);
+    const startedAt = Date.now();
+    const { stdout } = await this.run(args, { timeoutMs: 90_000 });
+    const parsed = parseListOutput(stdout);
+    const current = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
+    const folders = parsed.folders.filter((folder) => folder.path !== folderPath && folder.path !== current);
+    return {
+      ...parsed,
+      folders,
+      objects: parsed.objects.filter((object) => object.path !== current),
+      elapsedMs: Date.now() - startedAt,
+      limit: safeLimit,
+    };
+  }
+
+  async listBrief(folderPath, { marker = null, limit = 1000, signal = null } = {}) {
+    const safeLimit = Math.min(1000, Math.max(1, Number.parseInt(limit, 10) || 1000));
+    const args = ['ls', folderPath, '-s', `-limit=${safeLimit}`];
+    if (marker) args.push(`-marker=${marker}`);
+    const startedAt = Date.now();
+    const { stdout } = await this.run(args, { timeoutMs: 90_000, signal });
+    const parsed = parseBriefListOutput(stdout);
+    return {
+      ...parsed,
+      elapsedMs: Date.now() - startedAt,
+      limit: safeLimit,
+    };
+  }
+
+  async ensureLocalDir(name) {
+    const directory = path.join(this.cwd, name);
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    return directory;
+  }
+
+  async mkdir(folderPath) {
+    const { stdout, stderr } = await this.run(['mkdir', folderPath], {
+      timeoutMs: 60_000,
+      maxBytes: 2 * 1024 * 1024,
+    });
+    return { stdout, stderr };
+  }
+
+  async uploadFile(localPath, objectPath, { signal = null } = {}) {
+    const checkpointDir = await this.ensureLocalDir('.checkpoint');
+    const { stdout, stderr } = await this.run(
+      ['cp', localPath, objectPath, `-cpd=${checkpointDir}`],
+      { timeoutMs: 600_000, maxBytes: 8 * 1024 * 1024, signal },
+    );
+    return { stdout, stderr };
+  }
+
+  async copyObject(sourcePath, targetPath, { signal = null } = {}) {
+    const checkpointDir = await this.ensureLocalDir('.checkpoint');
+    const outputDir = await this.ensureLocalDir('.output');
+    const { stdout, stderr } = await this.run(
+      ['cp', sourcePath, targetPath, `-cpd=${checkpointDir}`, `-o=${outputDir}`],
+      { timeoutMs: 300_000, maxBytes: 4 * 1024 * 1024, signal },
+    );
+    return { stdout, stderr };
+  }
+
+  async moveObject(sourcePath, targetPath, { signal = null } = {}) {
+    const checkpointDir = await this.ensureLocalDir('.checkpoint');
+    const outputDir = await this.ensureLocalDir('.output');
+    const { stdout, stderr } = await this.run(
+      ['mv', sourcePath, targetPath, `-cpd=${checkpointDir}`, `-o=${outputDir}`],
+      { timeoutMs: 300_000, maxBytes: 4 * 1024 * 1024, signal },
+    );
+    return { stdout, stderr };
+  }
+
+  async remove(objectPath, { recursive = false, signal = null } = {}) {
+    const outputDir = await this.ensureLocalDir('.output');
+    const args = ['rm', objectPath];
+    if (recursive) args.push('-r');
+    args.push('-f', `-o=${outputDir}`);
+    const { stdout, stderr } = await this.run(args, {
+      timeoutMs: 600_000,
+      maxBytes: 8 * 1024 * 1024,
+      signal,
+    });
+    return { stdout, stderr };
+  }
+
+  async buckets({ force = false } = {}) {
+    const ttl = 120_000;
+    if (!force && this.bucketCache && Date.now() - this.bucketCacheAt < ttl) return this.bucketCache;
+    const { stdout, stderr } = await this.run(['ls'], { timeoutMs: 90_000, maxBytes: 8 * 1024 * 1024 });
+    this.bucketCache = parseBuckets(`${stdout}\n${stderr}`);
+    this.bucketCacheAt = Date.now();
+    return this.bucketCache;
+  }
+
+  async stat(objectPath) {
+    const { stdout } = await this.run(['stat', objectPath, '-bf=raw'], { timeoutMs: 60_000 });
+    const stat = parseStatOutput(stdout);
+    if (!stat.key) throw new ObsutilError('无法读取对象属性');
+    return stat;
+  }
+
+  async sign(objectPath, expires = 600) {
+    const { stdout, stderr } = await this.run(
+      ['sign', objectPath, `-e=${Math.min(3600, Math.max(60, Number(expires) || 600))}`],
+      { timeoutMs: 30_000, maxBytes: 1_000_000 },
+    );
+    const output = stripLogNoise(`${stdout}\n${stderr}`);
+    const match = output.match(/https?:\/\/[^\s]+/);
+    if (!match) throw new ObsutilError('未能生成对象签名链接');
+    return match[0];
+  }
+
+  async preview(objectPath) {
+    const stat = await this.stat(objectPath);
+    if (stat.type === 'folder') {
+      return { supported: false, reason: 'folder', stat };
+    }
+
+    const kind = classifyObject(stat.name || objectPath, stat.contentType || '');
+    const signedKinds = new Set(['image', 'video', 'audio', 'pdf']);
+    const maxPreviewBytes = 800 * 1024;
+
+    if (signedKinds.has(kind)) {
+      const url = await this.sign(objectPath, 900);
+      return {
+        supported: true,
+        inline: true,
+        kind,
+        url,
+        text: null,
+        stat,
+        sizeBytes: stat.sizeBytes,
+      };
+    }
+
+    if (!kind) {
+      return { supported: false, reason: 'binary', stat };
+    }
+
+    if ((stat.sizeBytes ?? 0) > maxPreviewBytes) {
+      return { supported: false, reason: 'too-large', stat, maxPreviewBytes };
+    }
+
+    const { stdout } = await this.run(['cat', objectPath], {
+      timeoutMs: 60_000,
+      maxBytes: Math.max(maxPreviewBytes + 4096, 2 * 1024 * 1024),
+    });
+    let text = stripLogNoise(stdout).replace(/\r\n?/g, '\n');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    if (text.includes('\u0000')) {
+      return { supported: false, reason: 'binary', stat };
+    }
+
+    return {
+      supported: true,
+      inline: true,
+      kind: kind === 'json' ? 'json' : 'text',
+      text,
+      stat,
+      sizeBytes: stat.sizeBytes,
+    };
+  }
+
+  async downloadUrl(objectPath, expires = 300) {
+    return this.sign(objectPath, expires);
+  }
+}

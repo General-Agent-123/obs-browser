@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#080b12" />
+    <title>OBS Explorer</title>
+    <meta
+      name="description"
+      content="使用本地 obsutil 浏览、检索和预览华为云 OBS 对象。"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23080b12'/%3E%3Cpath d='M15 23.5 32 14l17 9.5v17L32 50l-17-9.5z' fill='none' stroke='%235eead4' stroke-width='3'/%3E%3Cpath d='m15 23.5 17 9.7 17-9.7M32 33.2V50' fill='none' stroke='%235eead4' stroke-width='3'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <header class="topbar">
+        <button
+          class="icon-button menu-button"
+          id="menuButton"
+          type="button"
+          aria-label="打开存储桶导航"
+          aria-controls="sidebar"
+          aria-expanded="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+
+        <a class="brand" href="/" id="brandLink" aria-label="OBS Explorer 首页">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32">
+              <path d="m6.5 11.2 9.5-5.4 9.5 5.4v9.6L16 26.2l-9.5-5.4z" />
+              <path d="m6.5 11.2 9.5 5.5 9.5-5.5M16 16.7v9.5" />
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>OBS Explorer</strong>
+            <small>Object storage, locally</small>
+          </span>
+        </a>
+
+        <div class="topbar-spacer"></div>
+
+        <div class="connection is-loading" id="connection" role="status" aria-live="polite" title="正在读取 obsutil 状态">
+          <span class="connection-dot"></span>
+          <span class="connection-label" id="connectionLabel">正在连接</span>
+        </div>
+
+        <button
+          class="icon-button top-refresh"
+          id="topRefreshButton"
+          type="button"
+          aria-label="刷新当前目录"
+          title="刷新当前目录 (R)"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+            <path d="M20 4v7h-7" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="shell">
+        <div class="drawer-backdrop" id="drawerBackdrop"></div>
+
+        <aside class="sidebar" id="sidebar" aria-label="存储桶与快捷路径">
+          <div class="sidebar-scroll">
+            <section class="side-section bucket-section">
+              <div class="section-heading">
+                <h2>存储桶</h2>
+                <span class="section-count" id="bucketCount">—</span>
+              </div>
+              <label class="side-search">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" />
+                  <path d="m16 16 4 4" />
+                </svg>
+                <input
+                  id="bucketSearch"
+                  type="search"
+                  placeholder="筛选存储桶"
+                  autocomplete="off"
+                  spellcheck="false"
+                  aria-label="筛选存储桶"
+                />
+              </label>
+              <div class="bucket-list" id="bucketList" aria-live="polite"></div>
+            </section>
+
+            <section class="side-section" id="pinnedSection" hidden>
+              <div class="section-heading">
+                <h2>已固定</h2>
+                <span class="section-count" id="pinnedCount">0</span>
+              </div>
+              <div class="shortcut-list" id="pinnedList"></div>
+            </section>
+
+            <section class="side-section" id="recentSection" hidden>
+              <div class="section-heading">
+                <h2>最近访问</h2>
+              </div>
+              <div class="shortcut-list" id="recentList"></div>
+            </section>
+          </div>
+
+          <div class="sidebar-foot">
+            <span class="local-mark">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="5" y="10" width="14" height="10" rx="2.5" />
+                <path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10" />
+              </svg>
+              仅本机访问
+            </span>
+            <span class="sidebar-foot-detail">凭据留在 obsutil</span>
+          </div>
+        </aside>
+
+        <main class="main" id="main">
+          <div class="progress-track" id="progressTrack" aria-hidden="true"><span></span></div>
+
+          <div class="explorer-head">
+            <div class="path-row" id="pathRow">
+              <button class="icon-button path-up" id="upButton" type="button" aria-label="返回上级目录" title="返回上级目录">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" />
+                </svg>
+              </button>
+
+              <nav class="breadcrumbs" id="breadcrumbs" aria-label="OBS 路径"></nav>
+
+              <div class="path-tools">
+                <button class="icon-button" id="starButton" type="button" aria-label="固定此路径" title="固定此路径">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m12 3.8 2.5 5 5.5.8-4 3.9.95 5.5-4.95-2.6-4.95 2.6L8 13.5l-4-3.9 5.5-.8z" />
+                  </svg>
+                </button>
+                <button class="icon-button" id="copyPathButton" type="button" aria-label="复制当前路径" title="复制当前路径">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="8" y="8" width="11" height="11" rx="2" />
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                  </svg>
+                </button>
+                <button class="icon-button" id="editPathButton" type="button" aria-label="编辑路径" title="编辑路径 (⌘L)">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10z" />
+                    <path d="m13.5 7.5 3 3" />
+                  </svg>
+                </button>
+                <button class="icon-button" id="refreshButton" type="button" aria-label="刷新" title="刷新">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+                    <path d="M20 4v7h-7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <form class="path-form" id="pathForm" hidden>
+              <span class="path-prefix">obs://</span>
+              <input
+                id="pathInput"
+                type="text"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-label="输入 OBS 路径"
+                placeholder="bucket/path/to/folder/"
+              />
+              <button class="button button-primary button-compact" type="submit">前往</button>
+              <button class="button button-ghost button-compact" type="button" id="cancelPathButton">取消</button>
+            </form>
+
+            <div class="title-row">
+              <div class="title-block">
+                <p class="eyebrow" id="locationEyebrow">当前位置</p>
+                <h1 id="folderTitle">正在连接…</h1>
+                <p class="folder-meta" id="folderMeta">读取本地 obsutil 配置</p>
+              </div>
+
+              <div class="search-field" id="searchField">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" />
+                  <path d="m16 16 4 4" />
+                </svg>
+                <input
+                  id="searchInput"
+                  type="search"
+                  placeholder="搜索当前目录"
+                  autocomplete="off"
+                  spellcheck="false"
+                  maxlength="120"
+                  aria-label="搜索当前目录"
+                  enterkeyhint="search"
+                />
+                <button
+                  class="recursive-toggle"
+                  id="recursiveToggle"
+                  type="button"
+                  aria-pressed="false"
+                  title="递归搜索当前目录及所有子文件夹"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m12 3 8 4.5-8 4.5-8-4.5z" />
+                    <path d="m4 12 8 4.5 8-4.5M4 16.5 12 21l8-4.5" />
+                  </svg>
+                  递归
+                </button>
+                <kbd id="searchShortcut">/</kbd>
+              </div>
+            </div>
+
+            <div class="toolbar">
+              <div class="filter-chips" id="filterChips" role="tablist" aria-label="筛选对象类型">
+                <button class="filter-chip is-active" type="button" data-filter="all" role="tab" aria-selected="true">
+                  全部 <span class="chip-count" id="allCount">0</span>
+                </button>
+                <button class="filter-chip" type="button" data-filter="folder" role="tab" aria-selected="false">
+                  文件夹 <span class="chip-count" id="folderCount">0</span>
+                </button>
+                <button class="filter-chip" type="button" data-filter="file" role="tab" aria-selected="false">
+                  对象 <span class="chip-count" id="fileCount">0</span>
+                </button>
+              </div>
+              <div class="toolbar-right">
+                <div class="toolbar-meta" id="listState">正在加载</div>
+                <div class="toolbar-actions">
+                  <button class="button button-ghost button-compact toolbar-action" id="uploadButton" type="button" aria-label="上传文件" title="上传文件到当前目录">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5M5 20h14" />
+                    </svg>
+                    <span class="action-label">上传</span>
+                  </button>
+                  <button class="button button-ghost button-compact toolbar-action" id="newFolderButton" type="button" aria-label="新建文件夹" title="在当前目录新建文件夹">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3l2.1 2.3H18a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 18 19.3H6a2.5 2.5 0 0 1-2.5-2.5z" />
+                      <path d="M12 11v5M9.5 13.5h5" />
+                    </svg>
+                    <span class="action-label">新建文件夹</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="search-banner" id="searchBanner" hidden>
+              <span class="search-banner-icon" id="searchBannerIcon" aria-hidden="true"></span>
+              <span class="search-banner-title" id="searchBannerTitle">递归搜索</span>
+              <span class="search-banner-query" id="searchBannerQuery"></span>
+              <span class="search-banner-stats" id="searchBannerStats" aria-live="polite"></span>
+              <div class="search-banner-actions">
+                <button class="button button-ghost button-compact" id="searchActionButton" type="button" hidden>搜索</button>
+                <button class="button button-ghost button-compact" id="clearSearchButton" type="button">清除</button>
+              </div>
+            </div>
+
+            <div class="batch-bar" id="batchBar" hidden>
+              <span class="batch-count"><strong id="batchCount">0</strong> 个对象已选择<span class="batch-limit-hint" id="batchLimitHint" hidden> · 单次最多 200 个</span></span>
+              <div class="batch-actions">
+                <button class="button button-ghost button-compact" id="batchMoveButton" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 12 4 3-4 3"/></svg>
+                  移动到
+                </button>
+                <button class="button button-ghost button-compact" id="batchCopyButton" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+                  拷贝到
+                </button>
+                <button class="button button-danger button-compact" id="batchDeleteButton" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/><path d="M6.5 7l.8 12.1A1.9 1.9 0 0 0 9.2 21h5.6a1.9 1.9 0 0 0 1.9-1.9L17.5 7"/></svg>
+                  删除
+                </button>
+                <span class="batch-divider"></span>
+                <button class="button button-ghost button-compact" id="clearSelectionButton" type="button">取消选择</button>
+              </div>
+            </div>
+          </div>
+
+          <section class="table-region" id="tableRegion" aria-label="OBS 目录内容">
+            <div class="table-head" role="row">
+              <div class="select-column">
+                <input type="checkbox" id="selectAllCheckbox" aria-label="选择当前列表中的全部对象" />
+              </div>
+              <button class="sort-button name-column" type="button" data-sort="name" aria-label="按名称排序">
+                名称
+                <span class="sort-indicator"></span>
+              </button>
+              <button class="sort-button size-column" type="button" data-sort="size" aria-label="按大小排序">
+                大小
+                <span class="sort-indicator"></span>
+              </button>
+              <button class="sort-button modified-column" type="button" data-sort="modified" aria-label="按修改时间排序">
+                修改时间
+                <span class="sort-indicator"></span>
+              </button>
+              <div class="storage-column">存储类型</div>
+              <div class="actions-column">操作</div>
+            </div>
+
+            <div class="table-scroll" id="tableScroll">
+              <div class="rows" id="rows" role="rowgroup" aria-live="polite"></div>
+            </div>
+
+            <div class="load-more-wrap" id="loadMoreWrap" hidden>
+              <button class="button button-ghost load-more" id="loadMoreButton" type="button">
+                加载更多对象
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+              </button>
+            </div>
+          </section>
+
+          <div class="drop-overlay" id="dropOverlay" hidden>
+            <div class="drop-card">
+              <span class="drop-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5M5 20h14" />
+                </svg>
+              </span>
+              <strong>释放以上传到当前目录</strong>
+              <span id="dropTarget">—</span>
+            </div>
+          </div>
+
+          <footer class="main-foot">
+            <div class="foot-left">
+              <span class="foot-dot" id="footDot"></span>
+              <span id="footStatus">准备就绪</span>
+            </div>
+            <div class="foot-right">
+              <span id="endpointLabel">—</span>
+              <span class="foot-divider"></span>
+              <span id="syncLabel">尚未同步</span>
+            </div>
+          </footer>
+        </main>
+
+        <div class="inspector-backdrop" id="inspectorBackdrop"></div>
+
+        <aside class="inspector" id="inspector" aria-label="对象检查器" aria-hidden="true">
+          <header class="inspector-head">
+            <span class="ext-chip ext-other" id="previewBadge">DOC</span>
+            <div class="inspector-title">
+              <h2 id="previewName">对象检查器</h2>
+              <button class="inspector-path" id="previewPath" type="button" title="复制对象路径">
+                <span id="previewPathText">选择一个对象以查看内容</span>
+              </button>
+            </div>
+            <button class="icon-button inspector-close" id="closeInspectorButton" type="button" aria-label="关闭检查器">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m6 6 12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </header>
+
+          <div class="inspector-meta" id="previewMeta">
+            <span class="meta-chip">本地预览</span>
+          </div>
+
+          <div class="inspector-tabs" role="tablist" aria-label="检查器视图">
+            <button class="inspector-tab is-active" type="button" data-tab="preview" role="tab" aria-selected="true">预览</button>
+            <button class="inspector-tab" type="button" data-tab="details" role="tab" aria-selected="false">详情</button>
+            <span class="tab-spacer"></span>
+            <button class="icon-button tiny" id="copyContentButton" type="button" aria-label="复制文件内容" title="复制文件内容" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="11" height="11" rx="2" />
+                <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+              </svg>
+            </button>
+          </div>
+
+          <div class="preview-body" id="previewBody">
+            <div class="inspector-empty">
+              <span class="empty-orbit" aria-hidden="true">
+                <svg viewBox="0 0 48 48">
+                  <path d="m10 18 14-8 14 8v14l-14 8-14-8z" />
+                  <path d="m10 18 14 8 14-8M24 26v14" />
+                </svg>
+              </span>
+              <h3>对象检查器</h3>
+              <p>从左侧目录选择一个对象，在这里预览内容与元数据。</p>
+            </div>
+          </div>
+
+          <footer class="inspector-foot">
+            <button class="button button-ghost" id="copyObjectPathButton" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="11" height="11" rx="2" />
+                <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+              </svg>
+              复制路径
+            </button>
+            <a class="button button-primary" id="downloadButton" href="#" download>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 4v11M7.5 11 12 15.5 16.5 11M5 20h14" />
+              </svg>
+              下载对象
+            </a>
+          </footer>
+        </aside>
+      </div>
+    </div>
+
+    <input id="fileInput" type="file" multiple hidden />
+
+    <div class="modal-backdrop" id="modalBackdrop" hidden>
+      <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalSubtitle">
+        <header class="modal-head">
+          <span class="modal-icon" id="modalIcon" aria-hidden="true"></span>
+          <div class="modal-heading">
+            <h2 id="modalTitle">操作</h2>
+            <p id="modalSubtitle"></p>
+          </div>
+          <button class="icon-button modal-close" id="modalCloseButton" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          </button>
+        </header>
+        <div class="modal-body" id="modalBody"></div>
+        <footer class="modal-actions">
+          <button class="button button-ghost" id="modalCancelButton" type="button">取消</button>
+          <button class="button button-primary" id="modalConfirmButton" type="button">确定</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite">
+      <span class="toast-icon" id="toastIcon">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>
+      </span>
+      <span id="toastText"></span>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
