@@ -40,6 +40,7 @@ const ICONS = {
   folderPlus: '<path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3l2.1 2.3H18a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 18 19.3H6a2.5 2.5 0 0 1-2.5-2.5z"/><path d="M12 11v5M9.5 13.5h5"/>',
   trash: '<path d="M4 7h16M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/><path d="M6.5 7l.8 12.1A1.9 1.9 0 0 0 9.2 21h5.6a1.9 1.9 0 0 0 1.9-1.9L17.5 7"/><path d="M10 11v6M14 11v6"/>',
   move: '<path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 12 4 3-4 3"/>',
+  trajectory: '<path d="M3 12h3.2l2.3-6 3.6 12 2.4-6H21"/>',
 };
 
 const state = {
@@ -2396,6 +2397,7 @@ function makeRow(entry, index) {
   actions.className = 'row-actions';
   if (isFolder) {
     actions.append(actionButton('copy', '复制文件夹路径', 'copy'));
+    actions.append(actionButton('trajectory', '作为轨迹数据打开', 'trajectory'));
     actions.append(actionButton('open', '打开文件夹', 'chevronRight'));
     actions.append(actionButton('delete', '删除文件夹', 'trash'));
   } else {
@@ -3633,6 +3635,9 @@ function handleAction(action, row) {
   const entry = getEntryByPath(row.dataset.path);
   if (!entry) return;
   if (action === 'copy') copyText(entry.path, entry.type === 'folder' ? '文件夹路径已复制' : '对象路径已复制');
+  else if (action === 'trajectory' && entry.type === 'folder') {
+    window.open(`/trajectory?path=${encodeURIComponent(entry.path)}`, '_blank', 'noopener');
+  }
   else if (action === 'open' && entry.type === 'folder') loadPath(entry.path);
   else if (action === 'preview' && entry.type === 'file') openInspector(entry);
   else if (action === 'download' && entry.type === 'file') downloadEntry(entry);

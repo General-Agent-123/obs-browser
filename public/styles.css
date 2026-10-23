@@ -1719,6 +1719,16 @@ svg {
   color: var(--rose);
 }
 
+.row-actions .icon-button[data-action='trajectory'] {
+  color: var(--accent);
+}
+
+.row-actions .icon-button[data-action='trajectory']:hover {
+  border-color: rgba(94, 234, 212, 0.22);
+  background: rgba(94, 234, 212, 0.1);
+  color: var(--accent-strong);
+}
+
 .skeleton-row {
   cursor: default;
   animation: none;

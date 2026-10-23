@@ -13,6 +13,8 @@ import {
   ObsutilService,
 } from './src/obsutil.mjs';
 import { loadEnvFile } from './src/env.mjs';
+import { TrajectoryService } from './src/trajectory-service.mjs';
+import { objectPathFromReferer, rewriteHtmlRootUrls } from './src/trajectory.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnvFile(process.env.ENV_FILE || path.join(__dirname, '.env'));
@@ -45,15 +47,32 @@ function clampNumber(value, min, max, fallback) {
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.wasm': 'application/wasm',
+  '.xml': 'application/xml; charset=utf-8',
   '.txt': 'text/plain; charset=utf-8',
+  '.pdf': 'application/pdf',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
 };
 
 function securityHeaders(extra = {}) {
@@ -278,6 +297,98 @@ const obs = new ObsutilService({
   configPath: runtime.configPath,
   cwd: runtime.root || process.cwd(),
 });
+const trajectory = new TrajectoryService(obs);
+
+/**
+ * 代理 OBS 对象给轨迹查看器使用。
+ * 之所以走本地代理而不是直接返回签名 URL：HTML 交付物里的相对资源（css/js/图片）
+ * 需要落在同一路径前缀下才能被浏览器正确解析。
+ */
+
+
+
+
+
+
+
+function resolveRefererObjectPath(req, requestedPathname) {
+  const objectPath = objectPathFromReferer(req.headers.referer, req.headers.host, requestedPathname);
+  if (!objectPath) return null;
+  try {
+    return normalizeObjectPath(objectPath);
+  } catch {
+    return null;
+  }
+}
+
+async function serveTrajectoryFile(req, res, objectPath, requestPathname = '') {
+  let upstream = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const signedUrl = await trajectory.signedUrl(objectPath);
+    const requestHeaders = {};
+    if (req.headers.range) requestHeaders.Range = req.headers.range;
+    try {
+      upstream = await fetch(signedUrl, {
+        headers: requestHeaders,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (error) {
+      throw new HttpError(`读取 OBS 对象失败：${error.message}`, 502);
+    }
+    if (upstream.status === 403 && attempt === 0) {
+      trajectory.signedCache.delete(objectPath);
+      continue;
+    }
+    break;
+  }
+
+  if (!upstream) throw new HttpError('读取 OBS 对象失败', 502);
+  if (upstream.status === 404) throw new HttpError('对象不存在', 404);
+  if (!upstream.ok && upstream.status !== 206) {
+    throw new HttpError(`OBS 返回 HTTP ${upstream.status}`, 502);
+  }
+
+  const ext = path.extname(objectPath).toLowerCase();
+  const headers = securityHeaders({
+    'Content-Type': MIME_TYPES[ext] || upstream.headers.get('content-type') || 'application/octet-stream',
+    'Cache-Control': 'private, max-age=60',
+  });
+  for (const [source, target] of [
+    ['content-length', 'Content-Length'],
+    ['content-range', 'Content-Range'],
+    ['accept-ranges', 'Accept-Ranges'],
+    ['etag', 'ETag'],
+    ['last-modified', 'Last-Modified'],
+  ]) {
+    const value = upstream.headers.get(source);
+    if (value) headers[target] = value;
+  }
+  if (!headers['Accept-Ranges']) headers['Accept-Ranges'] = 'bytes';
+
+  const isHtml = ext === '.html' || ext === '.htm';
+  if (isHtml && upstream.status === 200) {
+    const html = await upstream.text();
+    const dirPrefix = requestPathname.slice(0, requestPathname.lastIndexOf('/') + 1) || '/';
+    const body = Buffer.from(rewriteHtmlRootUrls(html, dirPrefix), 'utf8');
+    headers['Content-Type'] = 'text/html; charset=utf-8';
+    headers['Content-Length'] = body.length;
+    // 允许同源子资源请求带上 Referer，用于把 Vite 预加载的 /assets/... 映射回交付物目录
+    headers['Referrer-Policy'] = 'same-origin';
+    res.writeHead(200, headers);
+    if (req.method === 'HEAD') res.end();
+    else res.end(body);
+    return;
+  }
+
+  res.writeHead(upstream.status === 206 ? 206 : 200, headers);
+  if (req.method === 'HEAD' || !upstream.body) {
+    await upstream.body?.cancel().catch(() => {});
+    res.end();
+    return;
+  }
+  Readable.fromWeb(upstream.body).pipe(res);
+}
 
 let versionInfo = { version: null, sdkVersion: null, platform: null };
 let versionError = null;
@@ -790,6 +901,57 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === '/api/trajectory/overview') {
+      const folderPath = normalizeFolderPath(url.searchParams.get('path'));
+      const overview = await trajectory.overview(folderPath);
+      sendJson(res, 200, overview);
+      return;
+    }
+
+    if (url.pathname === '/api/trajectory/messages') {
+      const folderPath = normalizeFolderPath(url.searchParams.get('path'));
+      const agent = url.searchParams.get('agent') || 'main';
+      const session = url.searchParams.get('session');
+      const from = url.searchParams.get('from') || '0';
+      const limit = url.searchParams.get('limit') || '300';
+      const page = await trajectory.messages(folderPath, { agent, session, from, limit });
+      sendJson(res, 200, page);
+      return;
+    }
+
+    if (url.pathname === '/api/trajectory/raw') {
+      const folderPath = normalizeFolderPath(url.searchParams.get('path'));
+      const agent = url.searchParams.get('agent') || 'main';
+      const session = url.searchParams.get('session');
+      const raw = await trajectory.raw(folderPath, { agent, session });
+      sendJson(res, 200, raw);
+      return;
+    }
+
+    if (url.pathname.startsWith('/trajectory/files/')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.setHeader('Allow', 'GET, HEAD');
+        fail(res, 405, '仅支持 GET 请求');
+        return;
+      }
+      const encodedPath = url.pathname.slice('/trajectory/files/'.length);
+      if (!encodedPath) throw new HttpError('缺少对象路径', 400);
+      const segments = encodedPath.split('/').map((segment) => decodeURIComponent(segment));
+      const objectPath = normalizeObjectPath(`obs://${segments.join('/')}`);
+      await serveTrajectoryFile(req, res, objectPath, url.pathname);
+      return;
+    }
+
+    // 交付物（常见于 Vite 产物）会从站点根路径请求 /assets/...；
+    // 用 Referer 定位它属于哪个交付物目录，再按 OBS 对象代理。
+    if (url.pathname.startsWith('/assets/')) {
+      const objectPath = resolveRefererObjectPath(req, url.pathname);
+      if (objectPath) {
+        await serveTrajectoryFile(req, res, objectPath, url.pathname);
+        return;
+      }
+    }
+
     if (url.pathname === '/api/preview') {
       const objectPath = normalizeObjectPath(url.searchParams.get('path'));
       const preview = await obs.preview(objectPath);
@@ -841,6 +1003,16 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       Readable.fromWeb(upstream.body).pipe(res);
+      return;
+    }
+
+    if (url.pathname === '/trajectory' || url.pathname === '/trajectory/') {
+      if (await serveStatic(req, res, '/trajectory/index.html')) return;
+      res.writeHead(
+        503,
+        securityHeaders({ 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }),
+      );
+      res.end('轨迹查看器尚未构建：请先运行 npm run build:trajectory');
       return;
     }
 

@@ -124,9 +124,59 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 - **批量操作**：勾选多个对象后移动到、拷贝到或批量删除，带目标冲突检查、实时进度和取消
 - 分页加载更多（每页 200 项）
 - JSON 格式化高亮、原始内容切换、文本行号、图片 / PDF / 音视频内联预览
+- **轨迹查看器**：文件夹行提供「作为轨迹数据打开」，用 `trajectory-viewer` 查看 OpenClaw session 消息流、系统提示、原数据，以及整个 workspace 文件树与 HTML 交付物
 - 对象详情、复制路径、复制临时签名链接、下载对象
 - 响应式布局，移动端使用抽屉式导航
 - 所有凭据只留在本地服务端，不会发送给浏览器
+
+## 轨迹查看器
+
+轨迹查看器是一个独立构建的 React 子系统，入口在 `http://127.0.0.1:4318/trajectory`，代码位于 [`trajectory/`](trajectory/)。它复用同一个本地 Node 服务和 `obsutil` 凭据，不会把 AK/SK 发给浏览器。
+
+使用方式：在 OBS Explorer 的文件夹行点击波形图标「作为轨迹数据打开」，或直接打开 `/trajectory?path=obs://bucket/.../task/`。页面也支持手动粘贴轨迹目录。
+
+![轨迹查看器](docs/trajectory-viewer.png)
+
+workspace 里的 HTML、Markdown、JSON、图片等文件都可以在页面内直接预览：
+
+![交付物预览](docs/trajectory-preview.png)
+
+它按 OpenClaw 轨迹目录约定读取：
+
+```text
+<task>/
+  agents/<agent>/sessions/<session>.jsonl              # 消息流
+  agents/<agent>/sessions/<session>.trajectory.jsonl   # trace / 系统提示
+  logs/trajectories/<run>/query1.json                  # 任务 query
+  logs/traj_stats_result.json                          # 统计
+  workspace/                                           # 整个产物目录（HTML、md、资源等）
+  workspace-evaluator/                                 # 可选：evaluator 产物目录
+```
+
+页面能力：
+
+- 默认选中 `main` agent，可在侧栏切换 evaluator / 其他 session
+- 消息流、思考过程、工具调用参数与结果、系统提示折叠卡
+- 「JSON」视图展示原始 session 事件与 trace 摘要
+- **侧栏列出整个 workspace 文件树**：默认显示全部文件，可切换「只看 HTML」；目录可折叠，HTML 文件高亮
+- 文件点击即在页面内预览：HTML 用 iframe，文本 / JSON / 图片 / PDF / 音视频走 `/api/preview`，其他类型可下载
+- 文件树右上角的 `OBS` 可直接跳到 OBS Explorer 的 workspace 目录，查看包含 `.git` 在内的完整目录
+- 轨迹查看器自带的「全部文件」抽屉同样接收整个 workspace 文件列表
+- HTML 通过本地 `/trajectory/files/...` 代理读取，里面的相对 css/js/图片可以正常加载
+- 构建产物常见的根绝对路径 `/assets/...` 会按交付物目录重写；Vite 运行时预加载产生的根路径请求通过同源 `Referer` 映射回交付物目录，多文件构建产物可以直接预览
+- 只读：不写 OBS，不需要评论/批注后端
+
+构建与开发：
+
+```bash
+npm run install:trajectory   # 安装 React / trajectory-viewer 依赖
+npm run build:trajectory     # 构建到 public/trajectory/
+npm run dev:trajectory       # 可选：Vite 开发服务 4319，API 代理到 4318
+```
+
+`public/trajectory/` 是构建产物，`npm start` 直接提供服务；修改 [`trajectory/src/`](trajectory/src/) 后需要重新执行 `npm run build:trajectory`。
+
+实现上限：单个 session / trace 最多读取 64 MB，workspace 递归扫描最多 40 页；文件树最多返回前 2000 个文件、HTML 交付物最多 200 个，超出时可在 OBS Explorer 中查看完整目录。文件树与交付物列表都会跳过 `.git`、`.openclaw`、`node_modules` 等工具目录；文本 / JSON 的内联预览上限为 800 KB（与 OBS Explorer 现有预览一致）。
 
 ## 递归搜索
 
