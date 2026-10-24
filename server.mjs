@@ -1276,4 +1276,14 @@ server.listen(PORT, HOST, () => {
   console.log(`Default path: ${DEFAULT_PATH}`);
   console.log(`obsutil config: ${runtime.managed ? 'isolated runtime' : 'default user config'}`);
   if (versionError) console.log(`obsutil warning: ${versionError}`);
+
+  // 跨地域访问 OBS 时一次 obsutil 调用可能要几秒，后台预热让第一个访客不用等。
+  setTimeout(() => {
+    obs.buckets({ force: true }).catch(() => {});
+    obs.list(DEFAULT_PATH).catch(() => {});
+  }, 500).unref?.();
+  // 桶列表变化很慢，定期保活，避免缓存过期后首屏又卡一次。
+  setInterval(() => {
+    obs.buckets({ force: true }).catch(() => {});
+  }, 4 * 60 * 1000).unref?.();
 });
