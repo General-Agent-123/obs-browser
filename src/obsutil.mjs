@@ -437,6 +437,12 @@ export class ObsutilError extends Error {
   }
 }
 
+function readTtl(name, fallback) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return Math.min(3_600_000, Math.floor(value));
+}
+
 export class ObsutilService {
   constructor({ bin = process.env.OBSUTIL_BIN || 'obsutil', configPath = null, cwd = process.cwd() } = {}) {
     this.bin = bin;
@@ -445,6 +451,21 @@ export class ObsutilService {
     this.bucketCache = null;
     this.bucketCacheAt = 0;
     this.versionCache = null;
+    // obsutil 是一个独立 CLI 进程，每次调用都要重新建连，跨地域时尤其慢。
+    // 短 TTL 的进程内缓存能让翻目录、刷新、重复预览几乎不产生新的 obsutil 调用。
+    this.listCache = new Map();
+    this.statCache = new Map();
+    this.listCacheTtlMs = readTtl('OBS_LIST_CACHE_MS', 30_000);
+    this.statCacheTtlMs = readTtl('OBS_STAT_CACHE_MS', 120_000);
+    this.bucketCacheTtlMs = readTtl('OBS_BUCKET_CACHE_MS', 300_000);
+  }
+
+  /** 写操作后清空读缓存，避免刚上传/删除的内容看不到。 */
+  invalidateCaches() {
+    this.listCache.clear();
+    this.statCache.clear();
+    this.bucketCache = null;
+    this.bucketCacheAt = 0;
   }
 
   async run(args, { timeoutMs = 60_000, maxBytes = 24 * 1024 * 1024, signal = null } = {}) {
@@ -538,8 +559,15 @@ export class ObsutilService {
     return this.versionCache;
   }
 
-  async list(folderPath, { marker = null, limit = 200 } = {}) {
+  async list(folderPath, { marker = null, limit = 200, force = false } = {}) {
     const safeLimit = Math.min(1000, Math.max(1, Number.parseInt(limit, 10) || 200));
+    const cacheKey = `${folderPath}\u0000${marker || ''}\u0000${safeLimit}`;
+    if (!force && this.listCacheTtlMs > 0) {
+      const cached = this.listCache.get(cacheKey);
+      if (cached && Date.now() - cached.at < this.listCacheTtlMs) {
+        return { ...cached.value, cached: true };
+      }
+    }
     const args = ['ls', folderPath, '-d', '-bf=raw', `-limit=${safeLimit}`];
     if (marker) args.push(`-marker=${marker}`);
     const startedAt = Date.now();
@@ -547,13 +575,44 @@ export class ObsutilService {
     const parsed = parseListOutput(stdout);
     const current = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
     const folders = parsed.folders.filter((folder) => folder.path !== folderPath && folder.path !== current);
-    return {
+    const result = {
       ...parsed,
       folders,
       objects: parsed.objects.filter((object) => object.path !== current),
       elapsedMs: Date.now() - startedAt,
       limit: safeLimit,
+      cached: false,
     };
+    this.rememberList(cacheKey, result);
+    return result;
+  }
+
+  /** 缓存目录结果，并把对象元数据喂给 stat 缓存，让预览少跑一次 obsutil。 */
+  rememberList(cacheKey, result) {
+    if (this.listCacheTtlMs <= 0) return;
+    this.listCache.set(cacheKey, { at: Date.now(), value: result });
+    if (this.listCache.size > 300) {
+      const oldest = this.listCache.keys().next().value;
+      this.listCache.delete(oldest);
+    }
+    if (this.statCacheTtlMs <= 0) return;
+    for (const object of result.objects) {
+      this.statCache.set(object.path, {
+        at: Date.now(),
+        stat: {
+          key: object.path,
+          name: object.name,
+          type: 'file',
+          sizeBytes: object.sizeBytes,
+          sizeLabel: object.sizeLabel,
+          modified: object.modified,
+          storageClass: object.storageClass,
+          etag: object.etag,
+          contentType: null,
+          fromList: true,
+        },
+      });
+    }
   }
 
   async listBrief(folderPath, { marker = null, limit = 1000, signal = null } = {}) {
@@ -581,6 +640,7 @@ export class ObsutilService {
       timeoutMs: 60_000,
       maxBytes: 2 * 1024 * 1024,
     });
+    this.invalidateCaches();
     return { stdout, stderr };
   }
 
@@ -590,6 +650,7 @@ export class ObsutilService {
       ['cp', localPath, objectPath, `-cpd=${checkpointDir}`],
       { timeoutMs: 600_000, maxBytes: 8 * 1024 * 1024, signal },
     );
+    this.invalidateCaches();
     return { stdout, stderr };
   }
 
@@ -600,6 +661,7 @@ export class ObsutilService {
       ['cp', sourcePath, targetPath, `-cpd=${checkpointDir}`, `-o=${outputDir}`],
       { timeoutMs: 300_000, maxBytes: 4 * 1024 * 1024, signal },
     );
+    this.invalidateCaches();
     return { stdout, stderr };
   }
 
@@ -610,6 +672,7 @@ export class ObsutilService {
       ['mv', sourcePath, targetPath, `-cpd=${checkpointDir}`, `-o=${outputDir}`],
       { timeoutMs: 300_000, maxBytes: 4 * 1024 * 1024, signal },
     );
+    this.invalidateCaches();
     return { stdout, stderr };
   }
 
@@ -623,11 +686,12 @@ export class ObsutilService {
       maxBytes: 8 * 1024 * 1024,
       signal,
     });
+    this.invalidateCaches();
     return { stdout, stderr };
   }
 
   async buckets({ force = false } = {}) {
-    const ttl = 120_000;
+    const ttl = this.bucketCacheTtlMs;
     if (!force && this.bucketCache && Date.now() - this.bucketCacheAt < ttl) return this.bucketCache;
     const { stdout, stderr } = await this.run(['ls'], { timeoutMs: 90_000, maxBytes: 8 * 1024 * 1024 });
     this.bucketCache = parseBuckets(`${stdout}\n${stderr}`);
@@ -635,10 +699,21 @@ export class ObsutilService {
     return this.bucketCache;
   }
 
-  async stat(objectPath) {
+  async stat(objectPath, { force = false } = {}) {
+    if (!force && this.statCacheTtlMs > 0) {
+      const cached = this.statCache.get(objectPath);
+      if (cached && Date.now() - cached.at < this.statCacheTtlMs) return { ...cached.stat };
+    }
     const { stdout } = await this.run(['stat', objectPath, '-bf=raw'], { timeoutMs: 60_000 });
     const stat = parseStatOutput(stdout);
     if (!stat.key) throw new ObsutilError('无法读取对象属性');
+    if (this.statCacheTtlMs > 0) {
+      this.statCache.set(objectPath, { at: Date.now(), stat });
+      if (this.statCache.size > 2000) {
+        const oldest = this.statCache.keys().next().value;
+        this.statCache.delete(oldest);
+      }
+    }
     return stat;
   }
 
@@ -654,12 +729,17 @@ export class ObsutilService {
   }
 
   async preview(objectPath) {
-    const stat = await this.stat(objectPath);
+    let stat = await this.stat(objectPath);
     if (stat.type === 'folder') {
       return { supported: false, reason: 'folder', stat };
     }
 
-    const kind = classifyObject(stat.name || objectPath, stat.contentType || '');
+    let kind = classifyObject(stat.name || objectPath, stat.contentType || '');
+    // 列表缓存里的元数据没有 Content-Type，遇到无扩展名的对象才补一次真实 stat。
+    if (!kind && !stat.contentType) {
+      stat = await this.stat(objectPath, { force: true });
+      kind = classifyObject(stat.name || objectPath, stat.contentType || '');
+    }
     const signedKinds = new Set(['image', 'video', 'audio', 'pdf']);
     const maxPreviewBytes = 800 * 1024;
 

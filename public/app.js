@@ -362,7 +362,7 @@ async function loadPath(input, { force = false, resetView = true, history = 'pus
 
   try {
     const data = await fetchJson(
-      `/api/list?path=${encodeURIComponent(target)}&limit=${PAGE_SIZE}`,
+      `/api/list?path=${encodeURIComponent(target)}&limit=${PAGE_SIZE}${force ? '&refresh=1' : ''}`,
       { signal: controller.signal },
     );
     if (controller.signal.aborted) return;

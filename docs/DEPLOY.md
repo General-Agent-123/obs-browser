@@ -174,3 +174,29 @@ git -C /data2/panjiacheng/obs-browser log --oneline -1
 ```
 
 若工作区没更新，手动执行 `git -C /data2/panjiacheng/obs-browser pull && systemctl restart obs-explorer`。
+
+## 8. 性能：为什么这台机器上偏慢
+
+`obsutil` 是独立 CLI，每个 API 请求都会新起进程并重新和 OBS 建 TLS 连接，因此**链路抖动会直接体现在每次点击上**。当前环境的实测：
+
+| 链路 | 实测 |
+|---|---|
+| 操作机 → OBS（cn-east-4） | RTT ≈ 0.7 ms（同地域，近似内网） |
+| 操作机 → dcb-server（贵阳） | RTT ≈ 80 ms |
+| dcb-server → OBS（跨地域公网） | TCP 握手 0.09 s ~ 7.2 s，抖动极大 |
+
+同一份 `obsutil ls`：操作机 ≈ 1.24 s（稳定），dcb-server ≈ 2.1 s，偶发 6 s 以上。
+
+**根因是地域错配**：桶在 `cn-east-4`（上海），dcb-server 在贵阳，所有 OBS 访问都跨地域走公网；再加上浏览器 → 贵阳这一段，文件内容实际是「OBS → 贵阳 → 你」的双跳。
+
+### 已做的缓解
+
+- 目录列表缓存 `OBS_LIST_CACHE_MS`（默认 30 s）：重复翻同一目录、返回/前进、刷新页面不再触发 `obsutil`。
+- 对象元数据缓存 `OBS_STAT_CACHE_MS`（默认 120 s）：`/api/list` 会把列表里的 size/mtime/etag 喂给 `stat` 缓存，打开预览不再多跑一次 `obsutil stat`。
+- 桶列表缓存 `OBS_BUCKET_CACHE_MS`（默认 300 s）：首屏侧边栏不再每次都等桶列表。
+- 写操作（上传/删除/移动/拷贝/新建目录）会清空上述缓存，避免看到旧数据。
+- 工具栏刷新按钮会带 `refresh=1` 强制绕过目录缓存。
+
+### 根治方案
+
+把服务放到与桶同地域（`cn-east-4` / 上海）的机器上，所有调用会回到 ~1.2 s 的稳定水平，下载也变成单跳。若该机器在外网，再配一层隧道/反向代理对外访问。

@@ -4,6 +4,7 @@ import {
   classifyObject,
   compileFilenameMatcher,
   humanToBytes,
+  ObsutilService,
   parseBriefListOutput,
   parseBuckets,
   parseListOutput,
@@ -178,4 +179,55 @@ test('compileFilenameMatcher supports substring and wildcard matching', () => {
   assert.equal(question('file1.json'), true);
   assert.equal(question('file10.json'), false);
   assert.equal(compileFilenameMatcher('')(), false);
+});
+
+test('ObsutilService caches listings and seeds stat metadata from them', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  let calls = 0;
+  service.run = async () => {
+    calls += 1;
+    return { stdout: LIST_SAMPLE, stderr: '' };
+  };
+
+  const folder = 'obs://example-bucket/task/current/';
+  const first = await service.list(folder);
+  assert.equal(first.cached, false);
+  assert.equal(calls, 1);
+
+  const second = await service.list(folder);
+  assert.equal(second.cached, true);
+  assert.equal(calls, 1, 'second read should come from cache');
+
+  const forced = await service.list(folder, { force: true });
+  assert.equal(forced.cached, false);
+  assert.equal(calls, 2);
+
+  // 列表里的对象元数据应直接满足 stat，无需再跑一次 obsutil
+  const stat = await service.stat('obs://example-bucket/task/current/00066_example.json');
+  assert.equal(stat.sizeBytes, 2384);
+  assert.equal(calls, 2, 'stat should reuse list metadata');
+
+  service.invalidateCaches();
+  const afterInvalidate = await service.list(folder);
+  assert.equal(afterInvalidate.cached, false);
+  assert.equal(calls, 3);
+});
+
+test('ObsutilService list cache can be disabled with TTL 0', async () => {
+  const previous = process.env.OBS_LIST_CACHE_MS;
+  process.env.OBS_LIST_CACHE_MS = '0';
+  try {
+    const service = new ObsutilService({ bin: 'obsutil' });
+    let calls = 0;
+    service.run = async () => {
+      calls += 1;
+      return { stdout: LIST_SAMPLE, stderr: '' };
+    };
+    await service.list('obs://example-bucket/task/current/');
+    await service.list('obs://example-bucket/task/current/');
+    assert.equal(calls, 2);
+  } finally {
+    if (previous === undefined) delete process.env.OBS_LIST_CACHE_MS;
+    else process.env.OBS_LIST_CACHE_MS = previous;
+  }
 });

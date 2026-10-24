@@ -615,7 +615,8 @@ const server = http.createServer(async (req, res) => {
       const folderPath = normalizeFolderPath(url.searchParams.get('path') || DEFAULT_PATH);
       const marker = url.searchParams.get('marker') || null;
       const limit = url.searchParams.get('limit') || '200';
-      const listed = await obs.list(folderPath, { marker, limit });
+      const force = url.searchParams.get('refresh') === '1';
+      const listed = await obs.list(folderPath, { marker, limit, force });
       const folders = attachEntryPaths(folderPath, listed.folders);
       const objects = attachEntryPaths(folderPath, listed.objects);
       sendJson(res, 200, {
@@ -637,6 +638,7 @@ const server = http.createServer(async (req, res) => {
         marker,
         limit: listed.limit,
         elapsedMs: listed.elapsedMs,
+        cached: Boolean(listed.cached),
       });
       return;
     }
