@@ -106,12 +106,36 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 | `OBS_DEFAULT_PATH` | 打开页面时显示的默认目录 | 上面的 task_configs 路径 |
 | `OBSUTIL_BIN` | obsutil 可执行文件或绝对路径 | `obsutil` |
 | `OBSUTIL_CONFIG` | 自定义 obsutil 配置文件 | `~/.obsutilconfig` |
+| `OBS_AUTH_TOKEN` | 共享访问口令；设置后需登录，留空则无鉴权 | 空（关闭） |
 | `OBS_SEARCH_MAX_RESULTS` | 递归搜索最多返回结果数 | `300` |
 | `OBS_SEARCH_MAX_SCAN` | 递归搜索最多扫描对象数 | `20000` |
 | `OBS_SEARCH_MAX_PAGES` | 递归搜索最多请求页数 | `200` |
 | `OBS_MAX_UPLOAD_BYTES` | 单文件上传大小上限（字节） | `536870912`（512 MB） |
 | `OBS_BATCH_MAX_ITEMS` | 单次批量操作最多对象数 | `200` |
 | `OBS_BATCH_CONCURRENCY` | 批量操作并发数 | `4` |
+
+## 访问口令（部署到服务器时使用）
+
+默认只监听 `127.0.0.1`，不需要登录。把服务放到服务器上、需要从别的机器访问时，务必设置访问口令：
+
+```dotenv
+HOST=0.0.0.0
+OBS_AUTH_TOKEN=<一段足够长的随机字符串>
+```
+
+开启后：
+
+- 未登录访问页面会跳到 `/login`，未登录调用 `/api/*` 返回 `401`
+- 登录后下发 `HttpOnly; SameSite=Lax` cookie（30 天），cookie 里是口令的 HMAC，不含口令本身
+- 想跳过表单，可访问一次 `http://<host>:4318/?token=<口令>`，服务端换取 cookie 后自动把口令从地址栏去掉
+- 右上角「退出登录」→ `/logout`
+- 同一来源 10 分钟内失败 8 次会被临时限流
+
+> 口令走明文 HTTP 时可能被链路嗅探，公网访问建议在反向代理上再加一层 HTTPS。
+
+## 部署到服务器
+
+推流式部署（裸仓库 + `post-receive` 钩子 + systemd）的完整步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
 ## 功能
 

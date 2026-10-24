@@ -15,6 +15,7 @@ import {
 import { loadEnvFile } from './src/env.mjs';
 import { TrajectoryService } from './src/trajectory-service.mjs';
 import { objectPathFromReferer, rewriteHtmlRootUrls } from './src/trajectory.mjs';
+import { createAuth, parseFormBody, renderLoginPage, sanitizeNextTarget } from './src/auth.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnvFile(process.env.ENV_FILE || path.join(__dirname, '.env'));
@@ -25,6 +26,9 @@ const HOST = process.env.HOST || '127.0.0.1';
 const DEFAULT_PATH =
   process.env.OBS_DEFAULT_PATH ||
   'obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_frontend_scientific_mechanism_oc/task_configs/';
+
+// 设置 OBS_AUTH_TOKEN 后启用共享口令登录；未设置时保持纯本地模式。
+const AUTH = createAuth({ token: process.env.OBS_AUTH_TOKEN });
 
 const SEARCH_PAGE_SIZE = 1000;
 const SEARCH_MAX_RESULTS = clampNumber(process.env.OBS_SEARCH_MAX_RESULTS, 1, 1000, 300);
@@ -121,6 +125,174 @@ function assertSameOrigin(req) {
     if (error instanceof HttpError) throw error;
     throw new HttpError('请求来源不合法', 403);
   }
+}
+
+function clientAddress(req) {
+  const address = req.socket?.remoteAddress || 'unknown';
+  return address.startsWith('::ffff:') ? address.slice(7) : address;
+}
+
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 8;
+const loginFailures = new Map();
+
+function loginBlocked(address) {
+  const record = loginFailures.get(address);
+  if (!record) return false;
+  if (Date.now() > record.resetAt) {
+    loginFailures.delete(address);
+    return false;
+  }
+  return record.failures >= LOGIN_MAX_FAILURES;
+}
+
+function noteLoginFailure(address) {
+  const now = Date.now();
+  const record = loginFailures.get(address);
+  if (!record || now > record.resetAt) {
+    loginFailures.set(address, { failures: 1, resetAt: now + LOGIN_WINDOW_MS });
+    return;
+  }
+  record.failures += 1;
+  if (loginFailures.size > 2000) {
+    for (const [key, value] of loginFailures) if (now > value.resetAt) loginFailures.delete(key);
+  }
+}
+
+function isSecureRequest(req) {
+  if (req.socket?.encrypted) return true;
+  const forwarded = req.headers['x-forwarded-proto'];
+  if (typeof forwarded !== 'string') return false;
+  return forwarded.split(',')[0].trim().toLowerCase() === 'https';
+}
+
+function redirect(res, location, extra = {}) {
+  res.writeHead(
+    303,
+    securityHeaders({
+      Location: location,
+      'Cache-Control': 'no-store',
+      ...extra,
+    }),
+  );
+  res.end();
+}
+
+async function readRawBody(req, limit = 16 * 1024) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let size = 0;
+    const chunks = [];
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
+    req.on('data', (chunk) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > limit) {
+        finish(() => reject(new HttpError('请求体过大', 413)));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      finish(() => resolve(Buffer.concat(chunks).toString('utf8')));
+    });
+    req.on('error', (error) => finish(() => reject(error)));
+  });
+}
+
+function serveLoginPage(req, res, { status = 200, error = '', next = '/' } = {}) {
+  const body = Buffer.from(renderLoginPage({ error, next }), 'utf8');
+  res.writeHead(
+    status,
+    securityHeaders({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': body.length,
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy':
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; base-uri 'none'",
+    }),
+  );
+  if (req.method === 'HEAD') res.end();
+  else res.end(body);
+}
+
+/**
+ * 鉴权闸门：未开启口令时直接放行；开启后除登录/退出外的所有请求都要带有效会话。
+ * 首次访问可以通过 `?token=<口令>` 换取 cookie，同时把口令从地址栏移除。
+ */
+async function handleAuth(req, res, url) {
+  if (!AUTH.enabled) return true;
+
+  const secure = isSecureRequest(req);
+
+  if (url.pathname === '/logout') {
+    redirect(res, '/login', { 'Set-Cookie': AUTH.clearCookie() });
+    return false;
+  }
+
+  if (AUTH.hasSession(req.headers.cookie)) {
+    if (url.pathname === '/login') {
+      redirect(res, '/');
+      return false;
+    }
+    return true;
+  }
+
+  const queryToken = url.searchParams.get('token');
+  if (queryToken && AUTH.verifyToken(queryToken)) {
+    url.searchParams.delete('token');
+    const target = `${url.pathname}${url.search}`;
+    redirect(res, target || '/', { 'Set-Cookie': AUTH.sessionCookie({ secure }) });
+    return false;
+  }
+
+  if (url.pathname === '/login') {
+    if (req.method === 'POST') {
+      const address = clientAddress(req);
+      if (loginBlocked(address)) {
+        serveLoginPage(req, res, { status: 429, error: '尝试次数过多，请稍后再试。', next: '/' });
+        return false;
+      }
+      let form = {};
+      try {
+        form = parseFormBody(await readRawBody(req));
+      } catch {
+        form = {};
+      }
+      const next = sanitizeNextTarget(form.next);
+      if (AUTH.verifyToken(form.token)) {
+        redirect(res, next, { 'Set-Cookie': AUTH.sessionCookie({ secure }) });
+        return false;
+      }
+      noteLoginFailure(address);
+      serveLoginPage(req, res, { status: 401, error: '口令不正确。', next });
+      return false;
+    }
+    serveLoginPage(req, res, { next: sanitizeNextTarget(url.searchParams.get('next') || '/') });
+    return false;
+  }
+
+  if (url.pathname.startsWith('/api/')) {
+    const body = JSON.stringify({ error: '未登录或会话已过期', login: '/login' });
+    res.writeHead(
+      401,
+      securityHeaders({
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        'Cache-Control': 'no-store',
+      }),
+    );
+    res.end(body);
+    return false;
+  }
+
+  redirect(res, `/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`);
+  return false;
 }
 
 async function readJsonBody(req, limit = 1024 * 1024) {
@@ -411,6 +583,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (!(await handleAuth(req, res, url))) return;
+
     if (url.pathname === '/api/meta') {
       sendJson(res, 200, {
         app: 'OBS Explorer',
@@ -423,6 +597,7 @@ const server = http.createServer(async (req, res) => {
         configMode: runtime.managed ? 'isolated' : 'default',
         uploadLimitBytes: MAX_UPLOAD_BYTES,
         batchMaxItems: BATCH_MAX_ITEMS,
+        authEnabled: AUTH.enabled,
         host: HOST,
         port: PORT,
       });

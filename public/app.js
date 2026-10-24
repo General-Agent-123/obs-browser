@@ -139,6 +139,7 @@ const dom = {
   connection: document.getElementById('connection'),
   connectionLabel: document.getElementById('connectionLabel'),
   topRefreshButton: document.getElementById('topRefreshButton'),
+  logoutLink: document.getElementById('logoutLink'),
   bucketSearch: document.getElementById('bucketSearch'),
   bucketList: document.getElementById('bucketList'),
   bucketCount: document.getElementById('bucketCount'),
@@ -267,6 +268,10 @@ async function fetchJson(url, options = {}) {
     payload = null;
   }
   if (!response.ok) {
+    if (response.status === 401) {
+      const target = `${window.location.pathname}${window.location.search}`;
+      window.location.replace(`/login?next=${encodeURIComponent(target)}`);
+    }
     const message = payload?.error || `请求失败（HTTP ${response.status}）`;
     throw new Error(message);
   }
@@ -281,6 +286,7 @@ async function loadMeta() {
   } catch (error) {
     state.metaError = error.message;
   }
+  if (dom.logoutLink) dom.logoutLink.hidden = !state.meta?.authEnabled;
   renderConnection();
   renderStatus();
 }
