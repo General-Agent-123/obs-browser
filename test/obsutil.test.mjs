@@ -231,3 +231,41 @@ test('ObsutilService list cache can be disabled with TTL 0', async () => {
     else process.env.OBS_LIST_CACHE_MS = previous;
   }
 });
+
+test('stale listing is returned immediately while a refresh runs in background', async () => {
+  const previousTtl = process.env.OBS_LIST_CACHE_MS;
+  const previousStale = process.env.OBS_LIST_STALE_MS;
+  process.env.OBS_LIST_CACHE_MS = '1';
+  process.env.OBS_LIST_STALE_MS = '60000';
+  try {
+    const service = new ObsutilService({ bin: 'obsutil' });
+    let started = 0;
+    let finished = 0;
+    service.run = async () => {
+      started += 1;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      finished += 1;
+      return { stdout: LIST_SAMPLE, stderr: '' };
+    };
+    await service.list('obs://example-bucket/task/current/');
+    assert.equal(started, 1);
+    assert.equal(finished, 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const stale = await service.list('obs://example-bucket/task/current/');
+    assert.equal(stale.cached, true);
+    assert.equal(stale.stale, true, 'expired entry should be served stale');
+    assert.equal(finished, 1, 'background refresh should not block the response');
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(finished, 2, 'background refresh should eventually run');
+    const refreshed = await service.list('obs://example-bucket/task/current/');
+    assert.equal(refreshed.cached, true);
+    assert.equal(refreshed.objects.length, 2, 'refreshed payload should be complete');
+  } finally {
+    if (previousTtl === undefined) delete process.env.OBS_LIST_CACHE_MS;
+    else process.env.OBS_LIST_CACHE_MS = previousTtl;
+    if (previousStale === undefined) delete process.env.OBS_LIST_STALE_MS;
+    else process.env.OBS_LIST_STALE_MS = previousStale;
+  }
+});

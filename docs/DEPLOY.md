@@ -192,12 +192,14 @@ git -C /data2/panjiacheng/obs-browser log --oneline -1
 ### 已做的缓解
 
 - 目录列表缓存 `OBS_LIST_CACHE_MS`（默认 30 s）：重复翻同一目录、返回/前进、刷新页面不再触发 `obsutil`。
+- 列表过期后采用 stale-while-revalidate（`OBS_LIST_STALE_MS`，默认 10 min）：先返回旧数据、后台静默刷新，翻目录不再阻塞。
 - 对象元数据缓存 `OBS_STAT_CACHE_MS`（默认 120 s）：`/api/list` 会把列表里的 size/mtime/etag 喂给 `stat` 缓存，打开预览不再多跑一次 `obsutil stat`。
 - 桶列表缓存 `OBS_BUCKET_CACHE_MS`（默认 300 s）：首屏侧边栏不再每次都等桶列表。
 - 写操作（上传/删除/移动/拷贝/新建目录）会清空上述缓存，避免看到旧数据。
 - 工具栏刷新按钮会带 `refresh=1` 强制绕过目录缓存。
 - 大于 1KB 的文本响应（JSON / JS / CSS / HTML）统一 gzip：目录列表 223 KB → 26 KB，`app.js` 124 KB → 29 KB，明显减少丢包链路上的传输时间。
 - `keepAliveTimeout` 提升到 65 s，浏览器复用连接，减少握手次数。
+- 同一目录的并发请求会合并成一次 `obsutil` 调用；服务启动时后台预热桶列表和默认目录；桶列表每 4 min 后台保活。
 
 ### 根治方案
 

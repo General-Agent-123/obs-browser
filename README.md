@@ -108,6 +108,7 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 | `OBSUTIL_CONFIG` | 自定义 obsutil 配置文件 | `~/.obsutilconfig` |
 | `OBS_AUTH_TOKEN` | 共享访问口令；设置后需登录，留空则无鉴权 | 空（关闭） |
 | `OBS_LIST_CACHE_MS` | 目录列表缓存时长（毫秒），`0` 关闭 | `30000` |
+| `OBS_LIST_STALE_MS` | 列表过期后仍可先返回旧数据并后台刷新的时长（毫秒） | `600000` |
 | `OBS_STAT_CACHE_MS` | 对象元数据缓存时长（毫秒），`0` 关闭 | `120000` |
 | `OBS_BUCKET_CACHE_MS` | 桶列表缓存时长（毫秒），`0` 关闭 | `300000` |
 | `OBS_SEARCH_MAX_RESULTS` | 递归搜索最多返回结果数 | `300` |

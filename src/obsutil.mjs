@@ -458,6 +458,7 @@ export class ObsutilService {
     this.inflightLists = new Map();
     this.inflightBuckets = null;
     this.listCacheTtlMs = readTtl('OBS_LIST_CACHE_MS', 30_000);
+    this.listStaleMs = readTtl('OBS_LIST_STALE_MS', 600_000);
     this.statCacheTtlMs = readTtl('OBS_STAT_CACHE_MS', 120_000);
     this.bucketCacheTtlMs = readTtl('OBS_BUCKET_CACHE_MS', 300_000);
   }
@@ -570,17 +571,26 @@ export class ObsutilService {
         return { ...cached.value, cached: true };
       }
     }
+    // 缓存过期但还在可容忍范围内：先把旧数据返回给页面，后台静默刷新。
+    const stale = this.listCache.get(cacheKey);
+    if (!force && stale && this.listCacheTtlMs > 0) {
+      const age = Date.now() - stale.at;
+      if (age < this.listStaleMs) {
+        this.loadList(folderPath, { marker, safeLimit, cacheKey, force: false }).catch(() => {});
+        return { ...stale.value, cached: true, stale: true };
+      }
+    }
+    return this.loadList(folderPath, { marker, safeLimit, cacheKey, force });
+  }
+
+  loadList(folderPath, { marker, safeLimit, cacheKey, force }) {
     // 同一目录的并发请求共用一次 obsutil 调用（例如页面首屏和启动预热撞在一起）。
     const inflightKey = `${cacheKey}\u0000${force ? 'force' : ''}`;
     const pending = this.inflightLists.get(inflightKey);
     if (pending) return pending;
     const task = this.fetchList(folderPath, { marker, safeLimit, cacheKey });
     this.inflightLists.set(inflightKey, task);
-    try {
-      return await task;
-    } finally {
-      this.inflightLists.delete(inflightKey);
-    }
+    return task.finally(() => this.inflightLists.delete(inflightKey));
   }
 
   async fetchList(folderPath, { marker, safeLimit, cacheKey }) {
