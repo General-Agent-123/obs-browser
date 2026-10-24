@@ -149,3 +149,28 @@ ss -tlnp | grep 4318                 # 端口占用
 ```
 
 `obsutil` 凭据仍在服务器 `~/.obsutilconfig`，服务启动时复制到 `0700` 临时目录使用，不落库、不进前端。
+
+## 7. 常见问题
+
+### 端口被占用（`EADDRINUSE`）
+
+`systemctl status obs-explorer` 显示 `listen EADDRINUSE: 0.0.0.0:4318` 时，先确认占用进程：
+
+```bash
+ss -tlnp | grep 4318
+```
+
+要么停掉占用进程，要么改 `.env` 里的 `PORT`（同时更新安全组/防火墙放行端口），然后 `systemctl restart obs-explorer`。
+
+### 页面能打开但接口 401
+
+说明未登录或 cookie 过期。重新打开 `http://<host>:4318/?token=<口令>`，或到 `/login` 输入口令。
+
+### 钩子推送后页面没变化
+
+```bash
+journalctl -u obs-explorer -n 30 --no-pager   # 看服务是否重启
+git -C /data2/panjiacheng/obs-browser log --oneline -1
+```
+
+若工作区没更新，手动执行 `git -C /data2/panjiacheng/obs-browser pull && systemctl restart obs-explorer`。
