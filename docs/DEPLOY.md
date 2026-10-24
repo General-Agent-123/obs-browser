@@ -196,6 +196,8 @@ git -C /data2/panjiacheng/obs-browser log --oneline -1
 - 桶列表缓存 `OBS_BUCKET_CACHE_MS`（默认 300 s）：首屏侧边栏不再每次都等桶列表。
 - 写操作（上传/删除/移动/拷贝/新建目录）会清空上述缓存，避免看到旧数据。
 - 工具栏刷新按钮会带 `refresh=1` 强制绕过目录缓存。
+- 大于 1KB 的文本响应（JSON / JS / CSS / HTML）统一 gzip：目录列表 223 KB → 26 KB，`app.js` 124 KB → 29 KB，明显减少丢包链路上的传输时间。
+- `keepAliveTimeout` 提升到 65 s，浏览器复用连接，减少握手次数。
 
 ### 根治方案
 

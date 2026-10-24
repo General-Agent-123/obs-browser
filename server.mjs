@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { gzipSync } from 'node:zlib';
 import {
   compileFilenameMatcher,
   createObsRuntime,
@@ -88,17 +89,42 @@ function securityHeaders(extra = {}) {
   };
 }
 
+// 远程访问时链路带宽和丢包都很关键：大于 1KB 的文本响应统一 gzip。
+const GZIP_MIN_BYTES = 1024;
+const COMPRESSIBLE_EXTENSIONS = new Set([
+  '.html', '.htm', '.js', '.mjs', '.css', '.json', '.map', '.svg', '.txt', '.xml', '.wasm',
+]);
+const staticGzipCache = new Map();
+
+function acceptsGzip(req) {
+  const header = req?.headers?.['accept-encoding'];
+  return typeof header === 'string' && /\bgzip\b/i.test(header);
+}
+
+function gzipCached(cacheKey, buffer) {
+  const cached = staticGzipCache.get(cacheKey);
+  if (cached) return cached;
+  const compressed = gzipSync(buffer, { level: 6 });
+  if (staticGzipCache.size > 100) staticGzipCache.clear();
+  staticGzipCache.set(cacheKey, compressed);
+  return compressed;
+}
+
 function sendJson(res, status, payload) {
-  const body = JSON.stringify(payload);
-  res.writeHead(
-    status,
-    securityHeaders({
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Length': Buffer.byteLength(body),
-      'Cache-Control': 'no-store',
-    }),
-  );
-  res.end(body);
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  const headers = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  };
+  let output = body;
+  if (body.length >= GZIP_MIN_BYTES && acceptsGzip(res.req)) {
+    output = gzipSync(body, { level: 6 });
+    headers['Content-Encoding'] = 'gzip';
+    headers['Vary'] = 'Accept-Encoding';
+  }
+  headers['Content-Length'] = output.length;
+  res.writeHead(status, securityHeaders(headers));
+  res.end(output);
 }
 
 function fail(res, status, message, extra = {}) {
@@ -450,6 +476,18 @@ async function serveStatic(req, res, pathname) {
     if (isHtml) {
       headers['Content-Security-Policy'] =
         "default-src 'self'; img-src 'self' data: http: https:; media-src 'self' http: https:; frame-src http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'";
+    }
+    const compressible = COMPRESSIBLE_EXTENSIONS.has(ext) && info.size >= GZIP_MIN_BYTES && acceptsGzip(req);
+    if (compressible) {
+      const buffer = await fs.readFile(fullPath);
+      const body = gzipCached(`${fullPath}:${info.mtimeMs}:${info.size}`, buffer);
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+      headers['Content-Length'] = body.length;
+      res.writeHead(200, securityHeaders(headers));
+      if (req.method === 'HEAD') res.end();
+      else res.end(body);
+      return true;
     }
     res.writeHead(200, securityHeaders(headers));
     if (req.method === 'HEAD') {
@@ -1228,6 +1266,10 @@ async function shutdown(signal) {
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// 公网高延迟链路下，让浏览器尽量复用连接，少付 TCP/TLS 握手成本。
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 
 server.listen(PORT, HOST, () => {
   console.log(`OBS Explorer listening at http://${HOST}:${PORT}`);
