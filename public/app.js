@@ -54,6 +54,13 @@ const state = {
   limit: PAGE_SIZE,
   elapsedMs: null,
   totalBytes: 0,
+  count: {
+    status: 'idle',
+    total: null,
+    atLeast: false,
+    error: null,
+    controller: null,
+  },
   loading: true,
   loadingMore: false,
   error: null,
@@ -329,6 +336,9 @@ async function loadPath(input, { force = false, resetView = true, history = 'pus
   const controller = new AbortController();
   state.listAbort = controller;
 
+  state.count.controller?.abort();
+  state.count = { status: 'idle', total: null, atLeast: false, error: null, controller: null };
+
   abortSearchStream();
   state.recursive = false;
   state.search = blankSearch();
@@ -377,6 +387,7 @@ async function loadPath(input, { force = false, resetView = true, history = 'pus
     state.lastSync = new Date();
     state.error = null;
     addRecent(target);
+    if (data.hasMore) startCount(target, { force });
   } catch (error) {
     if (error.name === 'AbortError' || controller.signal.aborted) return;
     state.error = error.message;
@@ -420,6 +431,50 @@ async function loadMore() {
     state.loadingMore = false;
     renderAll();
   }
+}
+
+/* 目录总数 --------------------------------------------------------------- */
+
+async function startCount(target, { force = false } = {}) {
+  const controller = new AbortController();
+  state.count = { status: 'loading', total: null, atLeast: false, error: null, controller };
+  renderTitle();
+
+  try {
+    const data = await fetchJson(
+      `/api/count?path=${encodeURIComponent(target)}${force ? '&refresh=1' : ''}`,
+      { signal: controller.signal },
+    );
+    if (
+      controller.signal.aborted
+      || state.path !== target
+      || state.count.controller !== controller
+    ) return;
+    state.count = {
+      status: 'done',
+      total: Number(data.total) || 0,
+      atLeast: Boolean(data.atLeast),
+      error: null,
+      controller: null,
+    };
+  } catch (error) {
+    if (error.name === 'AbortError' || controller.signal.aborted) return;
+    if (state.path !== target || state.count.controller !== controller) return;
+    state.count = {
+      status: 'error',
+      total: null,
+      atLeast: false,
+      error: error.message,
+      controller: null,
+    };
+  }
+
+  if (state.path === target) renderTitle();
+}
+
+function formatTotalCount(count) {
+  const value = Math.max(0, Number(count.total) || 0);
+  return `${count.atLeast ? '≥' : ''}${value.toLocaleString('zh-CN')}`;
 }
 
 /* Recursive search --------------------------------------------------------- */
@@ -2065,8 +2120,10 @@ function renderTitle() {
 
   document.title = `${title} · OBS Explorer`;
   const visible = visibleEntries();
+  const count = state.count;
   if (state.query || state.filter !== 'all') {
-    dom.folderMeta.textContent = `已筛选 ${visible.length} 项，共加载 ${state.entries.length} 项`;
+    const totalSuffix = count.status === 'done' ? `（共 ${formatTotalCount(count)} 项）` : '';
+    dom.folderMeta.textContent = `已筛选 ${visible.length} 项，共加载 ${state.entries.length} 项${totalSuffix}`;
   } else if (state.loading) {
     dom.folderMeta.textContent = '正在通过本地 obsutil 读取目录…';
   } else if (state.error) {
@@ -2086,10 +2143,31 @@ function renderTitle() {
   } else if (state.loadingMore) {
     dom.listState.textContent = '加载更多…';
   } else if (state.entries.length) {
-    const elapsed = state.elapsedMs ? `${(state.elapsedMs / 1000).toFixed(2)}s` : '';
-    dom.listState.textContent = `${visible.length} / ${state.entries.length} 项${elapsed ? ` · ${elapsed}` : ''}`;
+    const elapsed = state.elapsedMs ? ` · ${(state.elapsedMs / 1000).toFixed(2)}s` : '';
+    const loaded = state.entries.length;
+    const filtered = Boolean(state.query) || state.filter !== 'all';
+    if (filtered) {
+      const totalSuffix = count.status === 'done' ? ` · 共 ${formatTotalCount(count)} 项` : '';
+      dom.listState.textContent = `${visible.length} / ${loaded} 项${totalSuffix}${elapsed}`;
+      dom.listState.title = count.status === 'done'
+        ? '已筛选 / 已加载（当前目录共 N 项）'
+        : '已筛选 / 已加载';
+    } else if (count.status === 'done') {
+      const total = Math.max(Number(count.total) || 0, loaded);
+      const totalText = `${count.atLeast ? '≥' : ''}${total.toLocaleString('zh-CN')}`;
+      dom.listState.textContent = `${loaded.toLocaleString('zh-CN')} / ${totalText} 项${elapsed}`;
+      dom.listState.title = '已加载 / 当前目录总项数';
+    } else if (count.status === 'loading') {
+      dom.listState.textContent = `${loaded.toLocaleString('zh-CN')} 项已加载 · 正在统计总数…${elapsed}`;
+      dom.listState.title = '已加载当前页；后台正在列举当前目录统计总数';
+    } else {
+      const moreText = state.nextMarker ? ' · 还有更多' : '';
+      dom.listState.textContent = `${loaded.toLocaleString('zh-CN')} 项${moreText}${elapsed}`;
+      dom.listState.title = state.nextMarker ? '当前目录还有更多项未加载' : '';
+    }
   } else {
     dom.listState.textContent = '0 项';
+    dom.listState.title = '';
   }
 }
 
@@ -2105,6 +2183,13 @@ function renderFilters() {
   dom.allCount.textContent = counts.all;
   dom.folderCount.textContent = counts.folder;
   dom.fileCount.textContent = counts.file;
+  const count = state.count;
+  const countTitle = count.status === 'done'
+    ? `已加载 ${counts.all} 项，当前目录共 ${formatTotalCount(count)} 项`
+    : '已加载项数（筛选只作用于已加载的条目）';
+  dom.allCount.title = countTitle;
+  dom.folderCount.title = countTitle;
+  dom.fileCount.title = countTitle;
   dom.filterChips.querySelectorAll('[data-filter]').forEach((button) => {
     const active = button.dataset.filter === state.filter;
     button.classList.toggle('is-active', active);

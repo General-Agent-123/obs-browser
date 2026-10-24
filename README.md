@@ -93,6 +93,10 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 # OBS_SEARCH_MAX_PAGES=200
 # OBS_BATCH_MAX_ITEMS=200
 # OBS_BATCH_CONCURRENCY=4
+
+# 可选：目录总数统计的缓存与上限
+# OBS_COUNT_CACHE_MS=300000
+# OBS_COUNT_MAX_ENTRIES=100000
 ```
 
 `.env` 已加入 `.gitignore`，不要把它提交到仓库。
@@ -111,6 +115,8 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 | `OBS_LIST_STALE_MS` | 列表过期后仍可先返回旧数据并后台刷新的时长（毫秒） | `600000` |
 | `OBS_STAT_CACHE_MS` | 对象元数据缓存时长（毫秒），`0` 关闭 | `120000` |
 | `OBS_BUCKET_CACHE_MS` | 桶列表缓存时长（毫秒），`0` 关闭 | `300000` |
+| `OBS_COUNT_CACHE_MS` | 目录总数缓存时长（毫秒），`0` 关闭 | `300000` |
+| `OBS_COUNT_MAX_ENTRIES` | 目录总数最多统计多少项，超出显示为 `≥N` | `100000` |
 | `OBS_SEARCH_MAX_RESULTS` | 递归搜索最多返回结果数 | `300` |
 | `OBS_SEARCH_MAX_SCAN` | 递归搜索最多扫描对象数 | `20000` |
 | `OBS_SEARCH_MAX_PAGES` | 递归搜索最多请求页数 | `200` |
@@ -150,7 +156,7 @@ OBS_AUTH_TOKEN=<一段足够长的随机字符串>
 - **递归文件名搜索**：在当前目录及所有子目录中匹配文件名，支持 `*` / `?` 通配符、实时进度、停止和结果路径展示
 - 新建文件夹、拖拽/选择上传文件、覆盖同名对象、删除对象或递归删除文件夹
 - **批量操作**：勾选多个对象后移动到、拷贝到或批量删除，带目标冲突检查、实时进度和取消
-- 分页加载更多（每页 200 项）
+- 分页加载更多（每页 200 项），并在后台统计当前目录总项数
 - JSON 格式化高亮、原始内容切换、文本行号、图片 / PDF / 音视频内联预览
 - **轨迹查看器**：文件夹行提供「作为轨迹数据打开」，用 `trajectory-viewer` 查看 OpenClaw session 消息流、系统提示、原数据，以及整个 workspace 文件树与 HTML 交付物
 - 对象详情、复制路径、复制临时签名链接、下载对象
@@ -205,6 +211,19 @@ npm run dev:trajectory       # 可选：Vite 开发服务 4319，API 代理到 4
 `public/trajectory/` 是构建产物，`npm start` 直接提供服务；修改 [`trajectory/src/`](trajectory/src/) 后需要重新执行 `npm run build:trajectory`。
 
 实现上限：单个 session / trace 最多读取 64 MB，workspace 递归扫描最多 40 页；文件树最多返回前 2000 个文件、HTML 交付物最多 200 个，超出时可在 OBS Explorer 中查看完整目录。文件树与交付物列表都会跳过 `.git`、`.openclaw`、`node_modules` 等工具目录；文本 / JSON 的内联预览上限为 800 KB（与 OBS Explorer 现有预览一致）。
+
+## 目录总数
+
+OBS 和 obsutil 都没有“统计某个前缀有多少对象”的接口：
+
+- `obsutil ls` 末尾的 `Folder number` / `File number` 只是**本次请求返回**的数量，受 `-limit` 限制，不是目录总数。
+- `obsutil stat obs://bucket` 的 `ObjectNumber` 是**整桶**对象数，不支持前缀过滤。
+- `obsutil ls ... -du -limit=0` 只能算目录总大小，不返回数量。
+- OBS 控制台的“统计文件夹”功能不通过 API / SDK / obsutil 暴露。
+
+因此 OBS Explorer 在首屏只加载 200 项；如果还有下一页，会在后台执行 `obsutil ls obs://bucket/path/ -d -s -limit=0`，流式统计当前层的文件夹和对象数量。统计结果只用于底部计数，不会把全部条目塞进表格，默认缓存 5 分钟；超过 `OBS_COUNT_MAX_ENTRIES` 后停止并显示 `≥N`。
+
+这个后台统计本质上仍是分页列举，会产生“列举桶内对象”的请求费用；目录特别大时可以调低 `OBS_COUNT_MAX_ENTRIES`，或调大 `OBS_COUNT_CACHE_MS` 减少重复请求。
 
 ## 递归搜索
 

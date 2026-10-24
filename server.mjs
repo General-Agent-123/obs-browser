@@ -43,6 +43,7 @@ const MAX_UPLOAD_BYTES = clampNumber(
 );
 const BATCH_MAX_ITEMS = clampNumber(process.env.OBS_BATCH_MAX_ITEMS, 1, 1000, 200);
 const BATCH_CONCURRENCY = clampNumber(process.env.OBS_BATCH_CONCURRENCY, 1, 16, 4);
+const COUNT_MAX_ENTRIES = clampNumber(process.env.OBS_COUNT_MAX_ENTRIES, 1000, 1_000_000, 100_000);
 
 function clampNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -678,6 +679,41 @@ const server = http.createServer(async (req, res) => {
         elapsedMs: listed.elapsedMs,
         cached: Boolean(listed.cached),
       });
+      return;
+    }
+
+    if (url.pathname === '/api/count') {
+      const folderPath = normalizeFolderPath(url.searchParams.get('path') || DEFAULT_PATH);
+      const force = url.searchParams.get('refresh') === '1';
+      // OBS 没有前缀级计数接口，这里会列举当前层。客户端离开页面时立即终止，
+      // 避免后台还在为一个已经没人看的目录继续翻页。
+      const controller = new AbortController();
+      const onClose = () => {
+        if (!res.writableEnded) controller.abort();
+      };
+      res.on('close', onClose);
+      try {
+        const counted = await obs.countEntries(folderPath, {
+          maxEntries: COUNT_MAX_ENTRIES,
+          force,
+          signal: controller.signal,
+        });
+        sendJson(res, 200, {
+          path: folderPath,
+          folders: counted.folders,
+          objects: counted.objects,
+          total: counted.total,
+          atLeast: counted.atLeast,
+          truncated: counted.truncated,
+          elapsedMs: counted.elapsedMs,
+          cached: Boolean(counted.cached),
+          limit: COUNT_MAX_ENTRIES,
+        });
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+      } finally {
+        res.off('close', onClose);
+      }
       return;
     }
 

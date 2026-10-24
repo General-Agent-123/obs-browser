@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   classifyObject,
   compileFilenameMatcher,
+  createListingCounter,
   humanToBytes,
   ObsutilService,
   parseBriefListOutput,
@@ -165,6 +166,46 @@ File number: 3
   assert.equal(parsed.nextMarker, 'root/b/deep/file-three.json');
 });
 
+test('createListingCounter counts current-level folders and objects, excluding itself', () => {
+  const counter = createListingCounter('obs://example-bucket/root/', { maxEntries: 10 });
+  for (const line of [
+    'Start at 2026-10-21 07:46:35.214065 +0000 UTC',
+    '',
+    'Listing objects .',
+    'Folder list:',
+    'obs://example-bucket/root/',
+    'obs://example-bucket/root/a/',
+    'obs://example-bucket/root/b/',
+    'Object list:',
+    'obs://example-bucket/root/file-one.json',
+    'obs://example-bucket/root/file-two.json',
+    'Folder number: 3',
+    'File number: 2',
+  ]) {
+    counter.add(line);
+  }
+  assert.deepEqual(counter.result, {
+    folders: 2,
+    objects: 2,
+    total: 4,
+    truncated: false,
+    atLeast: false,
+  });
+});
+
+test('createListingCounter stops at the entry cap', () => {
+  const counter = createListingCounter('obs://example-bucket/root/', { maxEntries: 2 });
+  assert.equal(counter.add('obs://example-bucket/root/one.json'), true);
+  assert.equal(counter.add('obs://example-bucket/root/two.json'), false);
+  assert.deepEqual(counter.result, {
+    folders: 0,
+    objects: 2,
+    total: 2,
+    truncated: true,
+    atLeast: true,
+  });
+});
+
 test('compileFilenameMatcher supports substring and wildcard matching', () => {
   const substring = compileFilenameMatcher('Reference');
   assert.equal(substring('00066_Reference_Directions.json'), true);
@@ -268,4 +309,38 @@ test('stale listing is returned immediately while a refresh runs in background',
     if (previousStale === undefined) delete process.env.OBS_LIST_STALE_MS;
     else process.env.OBS_LIST_STALE_MS = previousStale;
   }
+});
+
+test('ObsutilService caches entry counts but not truncated ones', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  let calls = 0;
+  service.fetchCount = async () => {
+    calls += 1;
+    return { folders: 1, objects: 2, total: 3, truncated: false, atLeast: false };
+  };
+
+  const folder = 'obs://example-bucket/task/current/';
+  const first = await service.countEntries(folder);
+  assert.equal(first.cached, false);
+  assert.equal(first.total, 3);
+
+  const second = await service.countEntries(folder);
+  assert.equal(second.cached, true);
+  assert.equal(calls, 1, 'second count should come from cache');
+
+  const forced = await service.countEntries(folder, { force: true });
+  assert.equal(forced.cached, false);
+  assert.equal(calls, 2);
+
+  service.invalidateCaches();
+  await service.countEntries(folder);
+  assert.equal(calls, 3, 'write invalidation should clear count cache');
+
+  service.fetchCount = async () => {
+    calls += 1;
+    return { folders: 0, objects: 100, total: 100, truncated: true, atLeast: true };
+  };
+  await service.countEntries(folder, { maxEntries: 100 });
+  await service.countEntries(folder, { maxEntries: 100 });
+  assert.equal(calls, 5, 'truncated counts must not be cached');
 });

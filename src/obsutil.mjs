@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 
 const META_RE =
   /^\s+(\d{4}-\d{2}-\d{2}T\S+)\s+(\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB|PB))\s+(\S+)\s+"?([^"\s]+)"?\s*$/i;
@@ -199,6 +200,44 @@ export function parseBriefListOutput(output) {
   }
 
   return { objects, nextMarker: parseNextMarker(clean) };
+}
+
+/**
+ * 逐行统计当前层（`ls -d`）的文件夹和对象。
+ * OBS 没有“统计前缀对象数”的接口，只能把当前层列举一遍；
+ * 这里用流式计数，避免把几万行输出整个读进内存。
+ */
+export function createListingCounter(folderPath, { maxEntries = 100_000 } = {}) {
+  const self = String(folderPath || '').replace(/\/+$/, '');
+  const cap = Number.isFinite(maxEntries) && maxEntries > 0 ? Math.floor(maxEntries) : Infinity;
+  let folders = 0;
+  let objects = 0;
+  let total = 0;
+  let truncated = false;
+
+  return {
+    add(line) {
+      if (truncated) return false;
+      const value = String(line ?? '').trim();
+      if (!value.startsWith('obs://')) return true;
+
+      // obsutil 会在 Folder list 里带上当前目录自身，不能算作子项。
+      if (value.replace(/\/+$/, '') === self) return true;
+
+      if (value.endsWith('/')) folders += 1;
+      else objects += 1;
+      total += 1;
+
+      if (total >= cap) {
+        truncated = true;
+        return false;
+      }
+      return true;
+    },
+    get result() {
+      return { folders, objects, total, truncated, atLeast: truncated };
+    },
+  };
 }
 
 export function compileFilenameMatcher(query) {
@@ -455,18 +494,21 @@ export class ObsutilService {
     // 短 TTL 的进程内缓存能让翻目录、刷新、重复预览几乎不产生新的 obsutil 调用。
     this.listCache = new Map();
     this.statCache = new Map();
+    this.countCache = new Map();
     this.inflightLists = new Map();
     this.inflightBuckets = null;
     this.listCacheTtlMs = readTtl('OBS_LIST_CACHE_MS', 30_000);
     this.listStaleMs = readTtl('OBS_LIST_STALE_MS', 600_000);
     this.statCacheTtlMs = readTtl('OBS_STAT_CACHE_MS', 120_000);
     this.bucketCacheTtlMs = readTtl('OBS_BUCKET_CACHE_MS', 300_000);
+    this.countCacheTtlMs = readTtl('OBS_COUNT_CACHE_MS', 300_000);
   }
 
   /** 写操作后清空读缓存，避免刚上传/删除的内容看不到。 */
   invalidateCaches() {
     this.listCache.clear();
     this.statCache.clear();
+    this.countCache.clear();
     this.bucketCache = null;
     this.bucketCacheAt = 0;
   }
@@ -611,6 +653,117 @@ export class ObsutilService {
     };
     this.rememberList(cacheKey, result);
     return result;
+  }
+
+  /**
+   * 统计目录当前层的总项数。
+   * 使用 `ls -d -s -limit=0` 让 obsutil 自己翻页，输出通过 readline 流式消费；
+   * 达到 maxEntries 就杀掉进程并标记 truncated，避免超大王录把内存/时间打满。
+   */
+  async countEntries(folderPath, { maxEntries = 100_000, timeoutMs = 120_000, force = false, signal = null } = {}) {
+    const folder = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
+    const cacheKey = `${folder}\u0000${maxEntries}`;
+    if (!force && this.countCacheTtlMs > 0) {
+      const cached = this.countCache.get(cacheKey);
+      if (cached && Date.now() - cached.at < this.countCacheTtlMs) {
+        return { ...cached.value, cached: true };
+      }
+    }
+
+    const startedAt = Date.now();
+    const value = await this.fetchCount(folder, { maxEntries, timeoutMs, signal });
+    const result = { ...value, elapsedMs: Date.now() - startedAt, cached: false };
+    // 只缓存完整结果；被上限截断的结果下次仍应继续尝试。
+    if (this.countCacheTtlMs > 0 && !result.truncated) {
+      this.countCache.set(cacheKey, { at: Date.now(), value: result });
+      if (this.countCache.size > 300) {
+        const oldest = this.countCache.keys().next().value;
+        this.countCache.delete(oldest);
+      }
+    }
+    return result;
+  }
+
+  fetchCount(folderPath, { maxEntries, timeoutMs, signal }) {
+    const args = ['ls', folderPath, '-d', '-s', '-limit=0'];
+    if (this.configPath) args.push(`-config=${this.configPath}`);
+    if (signal?.aborted) return Promise.reject(new ObsutilError('操作已取消', { aborted: true }));
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timedOut = false;
+      let aborted = false;
+      let stderr = '';
+      let timer = null;
+      let child;
+
+      try {
+        child = spawn(this.bin, args, {
+          cwd: this.cwd,
+          env: { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (error) {
+        reject(new ObsutilError(`无法启动 obsutil：${error.message}`));
+        return;
+      }
+
+      const counter = createListingCounter(folderPath, { maxEntries });
+      const output = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+
+      const finish = (callback) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        output.close();
+        callback();
+      };
+
+      const onAbort = () => {
+        aborted = true;
+        child.kill('SIGKILL');
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, timeoutMs);
+
+      output.on('line', (line) => {
+        if (settled) return;
+        if (counter.add(line)) return;
+        child.kill('SIGKILL');
+      });
+
+      child.stderr.on('data', (chunk) => {
+        if (stderr.length < 2 * 1024 * 1024) stderr += chunk.toString('utf8');
+      });
+
+      child.on('error', (error) => {
+        finish(() => reject(new ObsutilError(`无法启动 obsutil：${error.message}`)));
+      });
+
+      child.on('close', (code) => {
+        finish(() => {
+          if (aborted) {
+            reject(new ObsutilError('操作已取消', { code, aborted: true }));
+            return;
+          }
+          if (timedOut) {
+            reject(new ObsutilError(`obsutil 执行超时（${Math.round(timeoutMs / 1000)} 秒）`, { code, timedOut: true }));
+            return;
+          }
+          const result = counter.result;
+          if (code !== 0 && !result.truncated) {
+            reject(new ObsutilError(cleanError('', stderr, `obsutil 退出码 ${code}`), { code }));
+            return;
+          }
+          resolve(result);
+        });
+      });
+    });
   }
 
   /** 缓存目录结果，并把对象元数据喂给 stat 缓存，让预览少跑一次 obsutil。 */
