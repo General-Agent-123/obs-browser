@@ -17,10 +17,16 @@ import type {
   TrajectoryPreview,
   TrajectorySession,
 } from './api';
+import { MarkdownPreview, openObjectUrl } from './markdown';
 
 type Theme = 'dark' | 'light';
 
 const LAST_PATH_KEY = 'obs-trajectory:last-path';
+
+/** markdown 在预览弹层里渲染成富文本；其余文本仍是 <pre> 源码 */
+function isMarkdownFile(file: TrajectoryFile): boolean {
+  return ['md', 'markdown'].includes(file.ext.toLowerCase());
+}
 
 function initialPath(): string {
   const fromQuery = new URLSearchParams(window.location.search).get('path') || '';
@@ -206,6 +212,7 @@ export default function App() {
   const [previewData, setPreviewData] = useState<TrajectoryPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [markdownRaw, setMarkdownRaw] = useState(false);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -278,6 +285,12 @@ export default function App() {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [preview]);
 
+  // 换一个文件预览时回到「渲染」视图；刷新（tick 变化）不重置
+  const previewFilePath = preview?.file.path ?? null;
+  useEffect(() => {
+    setMarkdownRaw(false);
+  }, [previewFilePath]);
+
   useEffect(() => {
     if (!preview) {
       setPreviewData(null);
@@ -337,8 +350,9 @@ export default function App() {
     () => deliveryFiles.map((item) => item.displayPath),
     [deliveryFiles],
   );
+  // 交付物抽屉在新标签打开：markdown 走渲染页，其余仍是原始对象
   const deliveryUrls = useMemo(
-    () => new Map(deliveryFiles.map((item) => [item.displayPath, trajectoryFileUrl(item.path)])),
+    () => new Map(deliveryFiles.map((item) => [item.displayPath, openObjectUrl(item.path)])),
     [deliveryFiles],
   );
   const treeFiles = useMemo(
@@ -742,6 +756,24 @@ export default function App() {
                 <span>{preview.file.displayPath}</span>
               </div>
               <div className="traj-preview-actions">
+                {isMarkdownFile(preview.file) ? (
+                  <div className="traj-mini-tabs" role="tablist" aria-label="markdown 视图切换">
+                    <button
+                      type="button"
+                      className={markdownRaw ? '' : 'is-active'}
+                      onClick={() => setMarkdownRaw(false)}
+                    >
+                      渲染
+                    </button>
+                    <button
+                      type="button"
+                      className={markdownRaw ? 'is-active' : ''}
+                      onClick={() => setMarkdownRaw(true)}
+                    >
+                      源码
+                    </button>
+                  </div>
+                ) : null}
                 <button type="button" onClick={() => setPreview({ ...preview, tick: Date.now() })}>
                   <Icon name="refresh" size={14} />
                   刷新
@@ -750,7 +782,7 @@ export default function App() {
                   <Icon name="file" size={14} />
                   下载
                 </a>
-                <a href={trajectoryFileUrl(preview.file.path)} target="_blank" rel="noreferrer">
+                <a href={openObjectUrl(preview.file.path)} target="_blank" rel="noreferrer">
                   <Icon name="external" size={14} />
                   新标签
                 </a>
@@ -800,6 +832,10 @@ export default function App() {
               ) : previewData.kind === 'audio' && previewData.url ? (
                 <div className="traj-preview-media">
                   <audio controls src={previewData.url} />
+                </div>
+              ) : isMarkdownFile(preview.file) && !markdownRaw ? (
+                <div className="traj-preview-markdown">
+                  <MarkdownPreview text={previewText} basePath={preview.file.path} />
                 </div>
               ) : (
                 <pre className="traj-preview-text">{previewText}</pre>
