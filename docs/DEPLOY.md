@@ -67,8 +67,7 @@ git push server main
 git clone /data2/panjiacheng/obs-browser.git /data2/panjiacheng/obs-browser
 git --git-dir=/data2/panjiacheng/obs-browser.git config deploy.worktree /data2/panjiacheng/obs-browser
 git --git-dir=/data2/panjiacheng/obs-browser.git config deploy.service obs-explorer
-ln -sf /data2/panjiacheng/obs-browser/deploy/post-receive \
-       /data2/panjiacheng/obs-browser.git/hooks/post-receive
+ln -sf /data2/panjiacheng/obs-browser/deploy/post-receive /data2/panjiacheng/obs-browser.git/hooks/post-receive
 chmod +x /data2/panjiacheng/obs-browser/deploy/post-receive
 ```
 
