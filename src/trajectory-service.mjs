@@ -17,6 +17,8 @@ import {
   claudeSessionEventsToMessages,
   collectHtmlDeliverables,
   collectWorkspaceFiles,
+  dshSessionEventsToMessages,
+  extractDshSystemPrompt,
   extractSystemPrompt,
   parseJsonLines,
   prependSystemPrompt,
@@ -217,6 +219,82 @@ export class TrajectoryService {
     return { agents, sessions };
   }
 
+
+  /** 列出 DSH 的 logs/dsh_harness/home/sessions/<agent>/.../session.jsonl */
+  async listDshSessions(folderPath) {
+    const root = joinFolder(joinFolder(folderPath, 'logs'), 'dsh_harness/home/sessions');
+    let recursive;
+    try {
+      recursive = await this.listRecursive(root);
+    } catch {
+      return { agents: [], sessions: [] };
+    }
+
+    const sessionObjects = recursive.objects.filter(
+      (object) => object.path.startsWith(root) && /(^|\/)session\.jsonl$/i.test(object.path),
+    );
+    const collected = [];
+    await mapLimit(sessionObjects, 4, async (object) => {
+      const relative = object.path.slice(root.length);
+      const project = relative.replace(/\/?session\.jsonl$/i, '').replace(/^\/+|\/+$/g, '');
+      const segments = project.split('/').filter(Boolean);
+      if (!segments.length) return;
+      let stat = null;
+      try {
+        stat = await this.obs.stat(object.path);
+      } catch {
+        stat = null;
+      }
+      let counts = null;
+      try {
+        const text = await this.readTextObject(object.path);
+        const lines = text.split('\n');
+        counts = {
+          assistantRounds: lines.filter((line) => line.includes('"type":"assistant/message"')).length,
+          toolCalls: lines.filter((line) => line.includes('"type":"tool/result"')).length,
+        };
+      } catch {
+        counts = null;
+      }
+      collected.push({
+        provider: 'dsh',
+        agent: segments[0],
+        project,
+        id: segments[segments.length - 1],
+        file: 'session.jsonl',
+        path: object.path,
+        sizeBytes: stat?.sizeBytes ?? null,
+        modified: stat?.modified ?? null,
+        hasTrace: false,
+        counts,
+      });
+    });
+
+    const byAgent = new Map();
+    for (const session of collected) {
+      const existing = byAgent.get(session.agent);
+      if (existing) {
+        existing.sessions.push(session);
+        existing.projects.push(session.project);
+      } else {
+        byAgent.set(session.agent, {
+          name: session.agent,
+          path: root,
+          provider: 'dsh',
+          project: session.project,
+          projects: [session.project],
+          sessions: [session],
+        });
+      }
+    }
+    const agents = [...byAgent.values()].sort((a, b) => a.name.localeCompare(b.name));
+    for (const agent of agents) agent.sessions.sort(sortByModifiedDesc);
+    const sessions = agents
+      .flatMap((agent) => agent.sessions)
+      .sort((a, b) => sortByModifiedDesc(a, b) || a.agent.localeCompare(b.agent));
+    return { agents, sessions };
+  }
+
   /** 读取 logs/trajectories/<latest>/query1.json + traj_stats_result.json */
   async listRuns(folderPath) {
     const trajectoriesRoot = joinFolder(joinFolder(folderPath, 'logs'), 'trajectories');
@@ -245,6 +323,19 @@ export class TrajectoryService {
     }
 
     const stats = await this.readJsonObject(joinObject(joinFolder(folderPath, 'logs'), 'traj_stats_result.json'));
+
+    // DSH 没有 logs/trajectories/query1.json，query 在 logs/<run>.log 的 [Q] 行里
+    if (!queryPayload && typeof stats?.log_file === 'string') {
+      try {
+        const logText = await this.readTextObject(joinObject(folderPath, stats.log_file.replace(/^\/+/, '')));
+        const line = logText.split('\n').find((item) => /\[Q\d*\]/.test(item));
+        const query = line?.slice(line.indexOf(']', line.indexOf('[Q')) + 1).trim();
+        if (query) queryPayload = { query, turns: [] };
+      } catch {
+        queryPayload = null;
+      }
+    }
+
     return {
       latest,
       list: runFolders.slice(0, 30),
@@ -337,10 +428,45 @@ export class TrajectoryService {
       this.listDeliverables(folderPath, 'workspace-evaluator', 'evaluator'),
     ]);
 
-    const agents = [...openclawListing.agents, ...claudeListing.agents]
-      .sort((a, b) => a.name.localeCompare(b.name));
-    const sessions = [...openclawListing.sessions, ...claudeListing.sessions]
-      .sort((a, b) => sortByModifiedDesc(a, b) || a.agent.localeCompare(b.agent));
+    const dshListing = runs.stats?.harness === 'dsh'
+      ? await this.listDshSessions(folderPath)
+      : { agents: [], sessions: [] };
+
+    const agents = [
+      ...openclawListing.agents,
+      ...claudeListing.agents,
+      ...dshListing.agents,
+    ].sort((a, b) => a.name.localeCompare(b.name));
+    const sessions = [
+      ...openclawListing.sessions,
+      ...claudeListing.sessions,
+      ...dshListing.sessions,
+    ].sort((a, b) => sortByModifiedDesc(a, b) || a.agent.localeCompare(b.agent));
+    const firstDsh = dshListing.sessions[0] ?? null;
+    let stats = runs.stats;
+    let runInfo = runs;
+    if (firstDsh?.counts) {
+      if (stats) {
+        const firstAgent = Array.isArray(stats.agents) ? stats.agents[0] : null;
+        stats = {
+          ...stats,
+          agents: [
+            {
+              ...(firstAgent ?? {}),
+              tool_calls: firstDsh.counts.toolCalls,
+              assistant_rounds: firstDsh.counts.assistantRounds,
+              has_trajectory: true,
+            },
+            ...(Array.isArray(stats.agents) ? stats.agents.slice(1) : []),
+          ],
+        };
+      }
+      runInfo = {
+        ...runs,
+        latest: firstDsh.id,
+        list: dshListing.sessions.map((session) => session.id),
+      };
+    }
     const deliverables = [...workspace.items, ...evaluator.items];
     const files = [...workspace.files, ...evaluator.files];
     const value = {
@@ -350,11 +476,12 @@ export class TrajectoryService {
       generatedAt: Date.now(),
       hasAgents,
       hasProjects,
+      hasDsh: dshListing.sessions.length > 0,
       hasWorkspace,
       agents,
       sessions,
-      runs,
-      stats: runs.stats,
+      runs: runInfo,
+      stats,
       workspace: {
         root: workspace.root,
         exists: workspace.exists,
@@ -390,6 +517,9 @@ export class TrajectoryService {
   async loadAgent(folderPath, { agent, session, provider = 'openclaw', project = null } = {}) {
     if (provider === 'claude-code') {
       return this.loadClaudeAgent(folderPath, { agent, session, project });
+    }
+    if (provider === 'dsh') {
+      return this.loadDshAgent(folderPath, { agent, session, project });
     }
     return this.loadOpenClawAgent(folderPath, { agent, session });
   }
@@ -436,6 +566,59 @@ export class TrajectoryService {
       traceText,
       sessionEvents: parsed.events,
       traceEvents,
+      parseErrors: parsed.parseErrors,
+      systemPrompt,
+      messages,
+    };
+    this.rememberAgent(sessionPath, value);
+    return value;
+  }
+
+
+  async loadDshAgent(folderPath, { agent, session, project }) {
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/.test(String(agent || ''))) {
+      throw new Error('agent 名称不合法');
+    }
+    const projectSegments = String(project || '').split('/').filter(Boolean);
+    if (
+      !projectSegments.length ||
+      projectSegments.some((segment) => !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(segment))
+    ) {
+      throw new Error('DSH session 路径不合法');
+    }
+    if (!/^[A-Za-z0-9._-]+\.jsonl$/i.test(String(session || ''))) {
+      throw new Error('session 文件名不合法');
+    }
+
+    const sessionsRoot = joinFolder(joinFolder(folderPath, 'logs'), 'dsh_harness/home/sessions');
+    const sessionPath = joinObject(sessionsRoot, `${projectSegments.join('/')}/${session}`);
+    const cached = this.agentCache.get(sessionPath);
+    if (cached && Date.now() - cached.at < AGENT_TTL) return cached.value;
+
+    const sessionText = await this.readTextObject(sessionPath);
+    const parsed = parseJsonLines(sessionText);
+    if (!parsed.events.length) throw new Error('该 DSH session 没有可解析的消息');
+
+    const systemPrompt = extractDshSystemPrompt(parsed.events);
+    const messages = prependSystemPrompt(
+      dshSessionEventsToMessages(parsed.events),
+      systemPrompt,
+      '系统提示 · DSH',
+    );
+    if (!messages.length) throw new Error('该 DSH session 没有可展示的消息');
+
+    const value = {
+      provider: 'dsh',
+      project: projectSegments.join('/'),
+      folderPath,
+      agent,
+      session,
+      sessionPath,
+      tracePath: null,
+      hasTrace: false,
+      traceText: null,
+      sessionEvents: parsed.events,
+      traceEvents: [],
       parseErrors: parsed.parseErrors,
       systemPrompt,
       messages,

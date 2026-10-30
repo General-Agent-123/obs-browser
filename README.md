@@ -158,7 +158,7 @@ OBS_AUTH_TOKEN=<一段足够长的随机字符串>
 - **批量操作**：勾选多个对象后移动到、拷贝到或批量删除，带目标冲突检查、实时进度和取消
 - 分页加载更多（每页 200 项），并在后台统计当前目录总项数
 - JSON 格式化高亮、原始内容切换、文本行号、图片 / PDF / 音视频内联预览
-- **轨迹查看器**：文件夹行提供「作为轨迹数据打开」，用 `trajectory-viewer` 查看 OpenClaw / Claude Code 轨迹消息流、系统提示、原数据，以及整个 workspace 文件树与 HTML 交付物
+- **轨迹查看器**：文件夹行提供「作为轨迹数据打开」，用 `trajectory-viewer` 查看 OpenClaw / Claude Code / DSH 轨迹消息流、系统提示、原数据，以及整个 workspace 文件树与 HTML 交付物
 - 对象详情、复制路径、复制临时签名链接、下载对象
 - 响应式布局，移动端使用抽屉式导航
 - 所有凭据只留在本地服务端，不会发送给浏览器
@@ -175,11 +175,15 @@ Claude Code 轨迹会自动识别 `projects/<project>/*.jsonl`，并展示 tool_
 
 ![Claude Code 轨迹](docs/trajectory-claude.png)
 
+DSH 轨迹会自动识别 `logs/dsh_harness/home/sessions/**/session.jsonl`，从 `request/header` 提取系统提示，并从 `logs/*.log` 的 `[Q]` 行补全任务 query：
+
+![DSH 轨迹](docs/trajectory-dsh.png)
+
 workspace 里的 HTML、Markdown、JSON、图片等文件都可以在页面内直接预览：
 
 ![交付物预览](docs/trajectory-preview.png)
 
-同时支持 OpenClaw 和 Claude Code 两种轨迹目录：
+同时支持 OpenClaw、Claude Code 和 DSH 三种轨迹目录：
 
 ```text
 # OpenClaw
@@ -191,7 +195,11 @@ workspace 里的 HTML、Markdown、JSON、图片等文件都可以在页面内�
 <task>/
   projects/<project>/<session>.jsonl                   # Claude Code session（含 tool_use/tool_result）
 
-# 两种格式共用
+# DSH
+<task>/
+  logs/dsh_harness/home/sessions/<agent>/.../session.jsonl  # DSH 事件流
+
+# 三种格式共用
   logs/trajectories/<run>/query1.json                  # 任务 query
   logs/traj_stats_result.json                          # 统计（harness 字段区分格式）
   workspace/                                           # 整个产物目录（HTML、md、资源等）
@@ -200,8 +208,8 @@ workspace 里的 HTML、Markdown、JSON、图片等文件都可以在页面内�
 
 页面能力：
 
-- 自动识别 OpenClaw 与 Claude Code，默认选中 `main` agent，可在侧栏切换 evaluator / 其他 session
-- 消息流、思考过程、工具调用参数与结果、系统提示折叠卡；Claude Code 的 `tool_result`、`isMeta` 注入上下文与压缩摘要会自动归类
+- 自动识别 OpenClaw、Claude Code 与 DSH，默认选中 `main` agent，可在侧栏切换 evaluator / 其他 session
+- 消息流、思考过程、工具调用参数与结果、系统提示折叠卡；Claude Code 的 `tool_result`、`isMeta` 注入上下文与压缩摘要会自动归类；DSH 的 `assistant/message`、`tool/result`、`request/header` 系统提示也会解析
 - 「JSON」视图展示原始 session 事件与 trace 摘要
 - **侧栏列出整个 workspace 文件树**：默认显示全部文件，可切换「只看 HTML」；目录可折叠，HTML 文件高亮
 - 文件点击即在页面内预览：HTML 用 iframe，文本 / JSON / 图片 / PDF / 音视频走 `/api/preview`，其他类型可下载
@@ -221,7 +229,7 @@ npm run dev:trajectory       # 可选：Vite 开发服务 4319，API 代理到 4
 
 `public/trajectory/` 是构建产物，`npm start` 直接提供服务；修改 [`trajectory/src/`](trajectory/src/) 后需要重新执行 `npm run build:trajectory`。
 
-实现上限：单个 session / trace 最多读取 64 MB，workspace 递归扫描最多 40 页；文件树最多返回前 2000 个文件、HTML 交付物最多 200 个，超出时可在 OBS Explorer 中查看完整目录。文件树与交付物列表都会跳过 `.git`、`.openclaw`、`node_modules` 等工具目录；文本 / JSON 的内联预览上限为 800 KB（与 OBS Explorer 现有预览一致）。
+实现上限：单个 session / trace 最多读取 64 MB，workspace 递归扫描最多 40 页；文件树最多返回前 2000 个文件、HTML 交付物最多 200 个，超出时可在 OBS Explorer 中查看完整目录。文件树与交付物列表都会跳过 `.git`、`.openclaw`、`.agents`、`node_modules` 等工具目录；文本 / JSON 的内联预览上限为 800 KB（与 OBS Explorer 现有预览一致）。
 
 ## 目录总数
 

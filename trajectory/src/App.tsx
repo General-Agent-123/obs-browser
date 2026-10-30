@@ -179,7 +179,9 @@ function selectionOptionValue(selection: SessionSelection | null): string {
 }
 
 function providerLabel(provider: string | null | undefined): string {
-  return provider === 'claude-code' ? 'Claude Code' : 'OpenClaw';
+  if (provider === 'claude-code') return 'Claude Code';
+  if (provider === 'dsh') return 'DSH';
+  return 'OpenClaw';
 }
 
 export default function App() {

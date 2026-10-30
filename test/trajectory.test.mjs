@@ -4,6 +4,8 @@ import {
   claudeSessionEventsToMessages,
   collectHtmlDeliverables,
   collectWorkspaceFiles,
+  dshSessionEventsToMessages,
+  extractDshSystemPrompt,
   extractSystemPrompt,
   parseJsonLines,
   objectPathFromReferer,
@@ -233,6 +235,51 @@ test('claudeSessionEventsToMessages maps user/assistant/tool_result/meta events'
   assert.equal(messages[3].label, '注入上下文 · Claude Code');
   assert.equal(messages[4].label, '上下文压缩摘要 · Claude Code');
   assert.equal(messages[5].content, '页面已完成');
+});
+
+test('dshSessionEventsToMessages maps DSH user/assistant/tool events and system prompt', () => {
+  const events = [
+    { type: 'request/header', data: { header: { system: 'You are a DSH agent.' } } },
+    { type: 'user/message', data: { content: [{ type: 'text', text: '做一个页面' }] } },
+    {
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [
+            { type: 'reasoning', text: '先看目录' },
+            { type: 'tool-call', id: 'call_1', name: 'bash', arguments: '{"command":"ls"}' },
+          ],
+        },
+      },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'call_1',
+              content: [{ type: 'text', text: 'app.js' }],
+              isError: false,
+            },
+          ],
+        },
+      },
+    },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '完成' }] } } },
+  ];
+  const system = extractDshSystemPrompt(events);
+  assert.equal(system, 'You are a DSH agent.');
+
+  const messages = dshSessionEventsToMessages(events);
+  assert.deepEqual(messages.map((message) => message.role), ['user', 'assistant', 'tool', 'assistant']);
+  assert.equal(messages[1].reasoning_content, '先看目录');
+  assert.equal(messages[1].tool_calls[0].function.name, 'bash');
+  assert.deepEqual(JSON.parse(messages[1].tool_calls[0].function.arguments), { command: 'ls' });
+  assert.equal(messages[2].tool_call_id, 'call_1');
+  assert.equal(messages[2].content, 'app.js');
+  assert.equal(messages[3].content, '完成');
 });
 
 test('objectPathFromReferer maps root assets to the deliverable directory', () => {

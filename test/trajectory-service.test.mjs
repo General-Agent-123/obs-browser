@@ -47,6 +47,7 @@ class FakeObs {
         agents: [{ tool_calls: 1, assistant_rounds: 1, total_tokens: 100 }],
       }),
     };
+    this.briefs = {};
     this.listings = {
       [ROOT]: {
         folders: [
@@ -88,6 +89,7 @@ class FakeObs {
   }
 
   async listBrief(folder) {
+    if (this.briefs[folder]) return this.briefs[folder];
     if (folder === `${ROOT}workspace/`) {
       return {
         objects: [
@@ -220,6 +222,98 @@ test('TrajectoryService reads Claude Code projects and paginates their sessions'
   assert.equal(raw.project, project);
   assert.equal(raw.traceFile, null);
   assert.equal(raw.sessionEvents.length, 3);
+});
+
+test('TrajectoryService reads DSH session events and system prompt', async () => {
+  const obs = new FakeObs();
+  const dshRoot = `${ROOT}logs/dsh_harness/home/sessions/`;
+  const project = 'main/query1_20261030T015821/--home-ma-user-.dsh-workspace-.sessions-query1_20261030T015821--/main-query1_20261030T015821';
+  const sessionPath = `${dshRoot}${project}/session.jsonl`;
+  const dshSession = [
+    { type: 'session', id: 'main-query1_20261030T015821' },
+    { type: 'request/header', data: { header: { system: 'You are a DSH agent.' } } },
+    { type: 'user/message', data: { content: [{ type: 'text', text: 'dsh 问题' }] } },
+    {
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [
+            { type: 'reasoning', text: '先看目录' },
+            { type: 'tool-call', id: 'dsh_call_1', name: 'bash', arguments: '{"command":"pwd"}' },
+          ],
+        },
+      },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'dsh_call_1',
+              content: [{ type: 'text', text: '/home/ma-user/.dsh/workspace' }],
+            },
+          ],
+        },
+      },
+    },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '完成' }] } } },
+  ].map((event) => JSON.stringify(event)).join('\n');
+
+  obs.files[sessionPath] = dshSession;
+  obs.files[`${ROOT}logs/1.log`] = '2026-10-30 01:58:21 [INFO] [Q] DSH query from log\n';
+  obs.files[`${ROOT}logs/traj_stats_result.json`] = JSON.stringify({
+    harness: 'dsh',
+    task_level: 'L3',
+    log_file: 'logs/1.log',
+    agents: [{ tool_calls: 0, assistant_rounds: 0 }],
+  });
+  delete obs.listings[`${ROOT}logs/trajectories/`];
+  obs.briefs[dshRoot] = {
+    objects: [{ path: sessionPath, name: 'session.jsonl' }],
+    nextMarker: null,
+  };
+
+  const service = new TrajectoryService(obs);
+  const overview = await service.overview(ROOT);
+  assert.equal(overview.ok, true);
+  assert.equal(overview.hasDsh, true);
+  assert.equal(overview.stats.harness, 'dsh');
+  assert.equal(overview.runs.query.query, 'DSH query from log');
+  const dsh = overview.sessions.find((session) => session.provider === 'dsh');
+  assert.ok(dsh);
+  assert.equal(dsh.agent, 'main');
+  assert.equal(dsh.project, project);
+  assert.equal(dsh.file, 'session.jsonl');
+
+  const page = await service.messages(ROOT, {
+    provider: 'dsh',
+    agent: 'main',
+    project,
+    session: 'session.jsonl',
+    from: 0,
+    limit: 10,
+  });
+  assert.equal(page.provider, 'dsh');
+  assert.equal(page.total, 5);
+  assert.deepEqual(page.messages.map((message) => message.role), [
+    'system', 'user', 'assistant', 'tool', 'assistant',
+  ]);
+  assert.equal(page.messages[0].label, '系统提示 · DSH');
+  assert.equal(page.messages[2].tool_calls[0].function.name, 'bash');
+  assert.equal(page.messages[3].tool_call_id, 'dsh_call_1');
+
+  const raw = await service.raw(ROOT, {
+    provider: 'dsh',
+    agent: 'main',
+    project,
+    session: 'session.jsonl',
+  });
+  assert.equal(raw.provider, 'dsh');
+  assert.equal(raw.systemPrompt, 'You are a DSH agent.');
+  assert.equal(raw.sessionEvents.length, 6);
+  assert.equal(raw.traceFile, null);
 });
 
 test('TrajectoryService rejects a folder without agents/workspace', async () => {

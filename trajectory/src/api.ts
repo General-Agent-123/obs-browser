@@ -1,7 +1,7 @@
 import type { Msg, MsgPage, TrajectoryDataSource } from 'trajectory-viewer';
 
 export interface TrajectorySession {
-  provider: 'openclaw' | 'claude-code' | string;
+  provider: 'openclaw' | 'claude-code' | 'dsh' | string;
   agent: string;
   project?: string | null;
   id: string;
@@ -59,6 +59,7 @@ export interface TrajectoryOverview {
   generatedAt?: number;
   hasAgents?: boolean;
   hasProjects?: boolean;
+  hasDsh?: boolean;
   hasWorkspace?: boolean;
   folders?: string[];
   files?: string[];

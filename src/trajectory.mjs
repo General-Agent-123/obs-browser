@@ -13,6 +13,7 @@ const HTML_EXTENSION_RE = /\.(?:html?|htm)$/i;
 const IGNORED_SEGMENTS = new Set([
   '.git',
   '.openclaw',
+  '.agents',
   '.cache',
   '.checkpoint',
   '.output',
@@ -320,6 +321,88 @@ export function claudeSessionEventsToMessages(events) {
   return messages.map((message, idx) => ({ ...message, idx }));
 }
 
+
+/** 从 DSH 的 request/header 事件里提取系统提示 */
+export function extractDshSystemPrompt(events) {
+  for (const event of events) {
+    if (event?.type !== 'request/header') continue;
+    const system = event.data?.header?.system;
+    if (typeof system === 'string' && system.trim()) return system;
+  }
+  return null;
+}
+
+/**
+ * 把 DSH 的 session JSONL 转成 trajectory-viewer 的消息流。
+ *
+ * DSH 的 session 是事件流：user/message、assistant/message 和 tool/result；
+ * assistant/message 的 content 包含 reasoning / text / tool-call blocks。
+ */
+export function dshSessionEventsToMessages(events) {
+  const messages = [];
+
+  for (const event of events) {
+    if (event?.type === 'user/message') {
+      const text = contentToText(event.data?.content);
+      if (text.trim()) messages.push(makeMessage('user', text));
+      continue;
+    }
+
+    if (event?.type === 'assistant/message') {
+      const blocks = Array.isArray(event.data?.message?.content)
+        ? event.data.message.content
+        : [];
+      const textParts = [];
+      const reasoningParts = [];
+      const toolCalls = [];
+
+      for (const block of blocks) {
+        if (!block || typeof block !== 'object') continue;
+        if (block.type === 'text' && typeof block.text === 'string' && block.text) {
+          textParts.push(block.text);
+        } else if (block.type === 'reasoning') {
+          const reasoning = block.text ?? block.reasoning ?? block.thinking;
+          if (typeof reasoning === 'string' && reasoning) reasoningParts.push(reasoning);
+        } else if (block.type === 'tool-call' || block.type === 'toolCall' || block.type === 'tool_use') {
+          const args = block.arguments ?? block.input;
+          toolCalls.push({
+            id: String(block.id ?? block.toolCallId ?? `call_${messages.length}_${toolCalls.length}`),
+            type: 'function',
+            function: {
+              name: String(block.name ?? block.toolName ?? 'tool'),
+              arguments: toolArgumentsToString(args),
+            },
+          });
+        }
+      }
+
+      const content = textParts.join('\n');
+      const reasoning = reasoningParts.join('\n');
+      messages.push(makeMessage('assistant', content, {
+        reasoning_content: reasoning || null,
+        reasoning_len: reasoning.length,
+        tool_calls: toolCalls.length ? toolCalls : null,
+      }));
+      continue;
+    }
+
+    if (event?.type === 'tool/result') {
+      const resultBlocks = event.data?.message?.content;
+      if (!Array.isArray(resultBlocks)) continue;
+      for (const block of resultBlocks) {
+        if (block?.type !== 'tool-result') continue;
+        let text = claudeToolResultText(block.content);
+        if (block.isError && text && !/^error\b/i.test(text)) text = `Error: ${text}`;
+        messages.push(makeMessage('tool', text, {
+          tool_call_id: block.toolCallId ?? event.data?.message?.source?.callId ?? null,
+        }));
+      }
+    }
+  }
+
+  return messages.map((message, idx) => ({ ...message, idx }));
+}
+
 /** 从 trace 事件里提取 openclaw 系统提示（context.compiled / prompt.submitted） */
 export function extractSystemPrompt(traceEvents) {
   for (const event of traceEvents) {
@@ -332,9 +415,9 @@ export function extractSystemPrompt(traceEvents) {
 }
 
 /** 把系统提示插到消息流最前面；已有 system 消息则不重复插入 */
-export function prependSystemPrompt(messages, systemPrompt) {
+export function prependSystemPrompt(messages, systemPrompt, label = '系统提示 · OpenClaw') {
   if (!systemPrompt || messages.some((message) => message.role === 'system')) return messages;
-  const system = makeMessage('system', systemPrompt, { label: '系统提示 · OpenClaw' });
+  const system = makeMessage('system', systemPrompt, { label });
   return [{ ...system, idx: 0 }, ...messages.map((message, idx) => ({ ...message, idx: idx + 1 }))];
 }
 
