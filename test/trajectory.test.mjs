@@ -7,6 +7,7 @@ import {
   dshSessionEventsToMessages,
   extractDshSystemPrompt,
   extractSystemPrompt,
+  mergeConsecutiveAssistantMessages,
   parseJsonLines,
   objectPathFromReferer,
   prependSystemPrompt,
@@ -235,6 +236,43 @@ test('claudeSessionEventsToMessages maps user/assistant/tool_result/meta events'
   assert.equal(messages[3].label, '注入上下文 · Claude Code');
   assert.equal(messages[4].label, '上下文压缩摘要 · Claude Code');
   assert.equal(messages[5].content, '页面已完成');
+});
+
+test('mergeConsecutiveAssistantMessages gives one avatar for thinking + tool call', () => {
+  const tool = (id) => ({ id, type: 'function', function: { name: 'bash', arguments: '{}' } });
+  const messages = [
+    {
+      idx: 0, role: 'assistant', preview: '', content_len: 0, content: '',
+      reasoning_len: 3, reasoning_content: '想', tool_calls: [tool('c1')], weight: null,
+      tool_call_id: null, label: null,
+    },
+    {
+      idx: 1, role: 'assistant', preview: '', content_len: 4, content: '执行',
+      reasoning_len: 2, reasoning_content: '继续', tool_calls: [tool('c2')], weight: null,
+      tool_call_id: null, label: null,
+    },
+    {
+      idx: 2, role: 'tool', preview: 'ok', content_len: 2, content: 'ok',
+      reasoning_len: 0, reasoning_content: null, tool_calls: null, weight: null,
+      tool_call_id: 'c2', label: null,
+    },
+    {
+      idx: 3, role: 'system', preview: '', content_len: 1, content: 's',
+      reasoning_len: 0, reasoning_content: null, tool_calls: null, weight: null,
+      tool_call_id: null, label: '系统',
+    },
+    {
+      idx: 4, role: 'assistant', preview: '', content_len: 5, content: '完成',
+      reasoning_len: 0, reasoning_content: null, tool_calls: null, weight: null,
+      tool_call_id: null, label: null,
+    },
+  ];
+  const merged = mergeConsecutiveAssistantMessages(messages);
+  assert.deepEqual(merged.map((message) => message.role), ['assistant', 'tool', 'system', 'assistant']);
+  assert.deepEqual(merged.map((message) => message.idx), [0, 1, 2, 3]);
+  assert.equal(merged[0].content, '执行');
+  assert.equal(merged[0].reasoning_content, '想\n\n继续');
+  assert.deepEqual(merged[0].tool_calls.map((call) => call.id), ['c1', 'c2']);
 });
 
 test('dshSessionEventsToMessages maps DSH user/assistant/tool events and system prompt', () => {

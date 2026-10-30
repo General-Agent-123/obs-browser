@@ -322,6 +322,43 @@ export function claudeSessionEventsToMessages(events) {
 }
 
 
+
+/**
+ * 合并连续的 assistant 消息，让同一轮思考 + 工具调用只占一个机器人头像。
+ * Claude Code 常把 thinking 和 tool_use 拆成两条相邻 assistant 记录；
+ * OpenClaw / DSH 也可能出现连续 assistant。tool 结果仍按 tool_call_id 配对。
+ */
+export function mergeConsecutiveAssistantMessages(messages) {
+  const merged = [];
+
+  for (const message of messages) {
+    const previous = merged[merged.length - 1];
+    if (message.role !== 'assistant' || previous?.role !== 'assistant') {
+      merged.push({ ...message });
+      continue;
+    }
+
+    const content = [previous.content, message.content].filter(Boolean).join('\n');
+    const reasoning = [previous.reasoning_content, message.reasoning_content]
+      .filter(Boolean)
+      .join('\n\n');
+    const toolCalls = [...(previous.tool_calls ?? []), ...(message.tool_calls ?? [])];
+
+    merged[merged.length - 1] = {
+      ...previous,
+      content,
+      content_len: content.length,
+      preview: firstLine(content || reasoning),
+      reasoning_content: reasoning || null,
+      reasoning_len: reasoning.length,
+      tool_calls: toolCalls.length ? toolCalls : null,
+      weight: previous.weight ?? message.weight ?? null,
+    };
+  }
+
+  return merged.map((message, idx) => ({ ...message, idx }));
+}
+
 /** 从 DSH 的 request/header 事件里提取系统提示 */
 export function extractDshSystemPrompt(events) {
   for (const event of events) {

@@ -20,6 +20,7 @@ import {
   dshSessionEventsToMessages,
   extractDshSystemPrompt,
   extractSystemPrompt,
+  mergeConsecutiveAssistantMessages,
   parseJsonLines,
   prependSystemPrompt,
   sessionEventsToMessages,
@@ -551,7 +552,9 @@ export class TrajectoryService {
     }
 
     const systemPrompt = extractSystemPrompt(traceEvents);
-    const messages = prependSystemPrompt(sessionEventsToMessages(parsed.events), systemPrompt);
+    const messages = mergeConsecutiveAssistantMessages(
+      prependSystemPrompt(sessionEventsToMessages(parsed.events), systemPrompt),
+    );
     if (!messages.length) throw new Error('该 session 没有可展示的消息');
 
     const value = {
@@ -600,10 +603,12 @@ export class TrajectoryService {
     if (!parsed.events.length) throw new Error('该 DSH session 没有可解析的消息');
 
     const systemPrompt = extractDshSystemPrompt(parsed.events);
-    const messages = prependSystemPrompt(
-      dshSessionEventsToMessages(parsed.events),
-      systemPrompt,
-      '系统提示 · DSH',
+    const messages = mergeConsecutiveAssistantMessages(
+      prependSystemPrompt(
+        dshSessionEventsToMessages(parsed.events),
+        systemPrompt,
+        '系统提示 · DSH',
+      ),
     );
     if (!messages.length) throw new Error('该 DSH session 没有可展示的消息');
 
@@ -646,7 +651,7 @@ export class TrajectoryService {
     const parsed = parseJsonLines(sessionText);
     if (!parsed.events.length) throw new Error('该 Claude Code session 没有可解析的消息');
 
-    const messages = claudeSessionEventsToMessages(parsed.events);
+    const messages = mergeConsecutiveAssistantMessages(claudeSessionEventsToMessages(parsed.events));
     if (!messages.length) throw new Error('该 Claude Code session 没有可展示的消息');
 
     const value = {

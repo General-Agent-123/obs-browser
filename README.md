@@ -209,7 +209,7 @@ workspace 里的 HTML、Markdown、JSON、图片等文件都可以在页面内�
 页面能力：
 
 - 自动识别 OpenClaw、Claude Code 与 DSH，默认选中 `main` agent，可在侧栏切换 evaluator / 其他 session
-- 消息流、思考过程、工具调用参数与结果、系统提示折叠卡；Claude Code 的 `tool_result`、`isMeta` 注入上下文与压缩摘要会自动归类；DSH 的 `assistant/message`、`tool/result`、`request/header` 系统提示也会解析
+- 消息流、思考过程、工具调用参数与结果、系统提示折叠卡；连续的 assistant 消息（如 Claude Code 的 thinking + tool_use）会合并为同一轮，只显示一个机器人头像；Claude Code 的 `tool_result`、`isMeta` 注入上下文与压缩摘要会自动归类；DSH 的 `assistant/message`、`tool/result`、`request/header` 系统提示也会解析
 - 「JSON」视图展示原始 session 事件与 trace 摘要
 - **侧栏列出整个 workspace 文件树**：默认显示全部文件，可切换「只看 HTML」；目录可折叠，HTML 文件高亮
 - 文件点击即在页面内预览：HTML 用 iframe，文本 / JSON / 图片 / PDF / 音视频走 `/api/preview`，其他类型可下载
