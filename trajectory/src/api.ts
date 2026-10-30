@@ -1,13 +1,23 @@
 import type { Msg, MsgPage, TrajectoryDataSource } from 'trajectory-viewer';
 
 export interface TrajectorySession {
+  provider: 'openclaw' | 'claude-code' | string;
   agent: string;
+  project?: string | null;
   id: string;
   file: string;
   path: string;
   sizeBytes: number | null;
   modified: string | null;
   hasTrace: boolean;
+}
+
+/** 当前选中的 session 寻址信息 */
+export interface SessionSelection {
+  provider: string;
+  agent: string;
+  project?: string | null;
+  session: string;
 }
 
 export interface TrajectoryFile {
@@ -48,6 +58,7 @@ export interface TrajectoryOverview {
   name: string;
   generatedAt?: number;
   hasAgents?: boolean;
+  hasProjects?: boolean;
   hasWorkspace?: boolean;
   folders?: string[];
   files?: string[];
@@ -77,6 +88,8 @@ export interface TrajectoryOverview {
 }
 
 export interface TrajectoryRaw {
+  provider: string;
+  project?: string | null;
   folderPath: string;
   agent: string;
   session: string;
@@ -131,18 +144,19 @@ export function fetchOverview(path: string, signal?: AbortSignal): Promise<Traje
 
 export async function fetchMessages(
   path: string,
-  agent: string,
-  session: string,
+  selection: SessionSelection,
   from: number,
   limit: number,
 ): Promise<MsgPage> {
   const query = new URLSearchParams({
     path,
-    agent,
-    session,
+    agent: selection.agent,
+    session: selection.session,
+    provider: selection.provider || 'openclaw',
     from: String(from),
     limit: String(limit),
   });
+  if (selection.project) query.set('project', selection.project);
   const page = await getJson<MsgPage & { total: number }>(`/api/trajectory/messages?${query}`);
   return {
     messages: (page.messages ?? []) as Msg[],
@@ -152,8 +166,14 @@ export async function fetchMessages(
   };
 }
 
-export function fetchRaw(path: string, agent: string, session: string): Promise<TrajectoryRaw> {
-  const query = new URLSearchParams({ path, agent, session });
+export function fetchRaw(path: string, selection: SessionSelection): Promise<TrajectoryRaw> {
+  const query = new URLSearchParams({
+    path,
+    agent: selection.agent,
+    session: selection.session,
+    provider: selection.provider || 'openclaw',
+  });
+  if (selection.project) query.set('project', selection.project);
   return getJson<TrajectoryRaw>(`/api/trajectory/raw?${query}`);
 }
 
@@ -165,10 +185,10 @@ export function downloadUrl(objectPath: string): string {
   return `/api/download?path=${encodeURIComponent(objectPath)}`;
 }
 
-export function createDataSource(path: string, agent: string, session: string): TrajectoryDataSource {
+export function createDataSource(path: string, selection: SessionSelection): TrajectoryDataSource {
   return {
-    fetchMessages: ({ from, limit }) => fetchMessages(path, agent, session, from, limit),
-    fetchRaw: () => fetchRaw(path, agent, session),
+    fetchMessages: ({ from, limit }) => fetchMessages(path, selection, from, limit),
+    fetchRaw: () => fetchRaw(path, selection),
   };
 }
 

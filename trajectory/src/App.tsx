@@ -10,7 +10,13 @@ import {
   formatDate,
   trajectoryFileUrl,
 } from './api';
-import type { TrajectoryFile, TrajectoryOverview, TrajectoryPreview } from './api';
+import type {
+  SessionSelection,
+  TrajectoryFile,
+  TrajectoryOverview,
+  TrajectoryPreview,
+  TrajectorySession,
+} from './api';
 
 type Theme = 'dark' | 'light';
 
@@ -59,11 +65,12 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
 function statsChips(overview: TrajectoryOverview | null): Array<{ label: string; value: string }> {
   if (!overview?.ok) return [];
   const stats = overview.stats as
-    | { task_level?: unknown; best_completion?: unknown; agents?: Array<Record<string, unknown>> }
+    | { task_level?: unknown; best_completion?: unknown; harness?: unknown; agents?: Array<Record<string, unknown>> }
     | null
     | undefined;
   const firstAgent = Array.isArray(stats?.agents) ? stats?.agents[0] : null;
   const chips: Array<{ label: string; value: string }> = [];
+  if (stats?.harness) chips.push({ label: 'Harness', value: String(stats.harness) });
   if (stats?.task_level) chips.push({ label: 'Level', value: String(stats.task_level) });
   if (firstAgent?.tool_calls != null) chips.push({ label: 'Tool calls', value: String(firstAgent.tool_calls) });
   if (firstAgent?.assistant_rounds != null) chips.push({ label: 'Rounds', value: String(firstAgent.assistant_rounds) });
@@ -161,6 +168,20 @@ function FileTree({
   );
 }
 
+
+function sessionOptionValue(session: TrajectorySession): string {
+  return JSON.stringify([session.provider ?? 'openclaw', session.agent, session.project ?? '', session.file]);
+}
+
+function selectionOptionValue(selection: SessionSelection | null): string {
+  if (!selection) return '';
+  return JSON.stringify([selection.provider, selection.agent, selection.project ?? '', selection.session]);
+}
+
+function providerLabel(provider: string | null | undefined): string {
+  return provider === 'claude-code' ? 'Claude Code' : 'OpenClaw';
+}
+
 export default function App() {
   const [path, setPath] = useState(initialPath);
   const [pathInput, setPathInput] = useState(path);
@@ -176,7 +197,7 @@ export default function App() {
       return 'dark';
     }
   });
-  const [selection, setSelection] = useState<{ agent: string; session: string } | null>(null);
+  const [selection, setSelection] = useState<SessionSelection | null>(null);
   const [queryExpanded, setQueryExpanded] = useState(false);
   const [fileView, setFileView] = useState<'all' | 'html'>('all');
   const [preview, setPreview] = useState<{ file: TrajectoryFile; tick: number } | null>(null);
@@ -235,7 +256,14 @@ export default function App() {
         return previous;
       }
       const first = sessions.find((session) => session.agent === 'main') ?? sessions[0];
-      return first ? { agent: first.agent, session: first.file } : null;
+      return first
+        ? {
+            provider: first.provider ?? 'openclaw',
+            agent: first.agent,
+            project: first.project ?? null,
+            session: first.file,
+          }
+        : null;
     });
   }, [overview]);
 
@@ -279,17 +307,22 @@ export default function App() {
     return () => controller.abort();
   }, [preview]);
 
-  const selectedSession = useMemo(
-    () =>
+  const selectedSession = useMemo(() => {
+    if (!selection) return null;
+    return (
       overview?.sessions?.find(
-        (session) => session.agent === selection?.agent && session.file === selection.session,
-      ) ?? null,
-    [overview, selection],
-  );
+        (session) =>
+          session.file === selection.session &&
+          session.agent === selection.agent &&
+          (session.provider ?? 'openclaw') === selection.provider &&
+          (session.project ?? null) === (selection.project ?? null),
+      ) ?? null
+    );
+  }, [overview, selection]);
 
   const dataSource = useMemo<TrajectoryDataSource | null>(() => {
     if (!path || !selection) return null;
-    return createDataSource(path, selection.agent, selection.session);
+    return createDataSource(path, selection);
   }, [path, selection]);
 
   const files = overview?.workspaceFiles ?? [];
@@ -490,15 +523,26 @@ export default function App() {
               {overview.sessions?.length ? (
                 <label className="traj-select">
                   <select
-                    value={selection ? `${selection.agent}|${selection.session}` : ''}
+                    value={selectionOptionValue(selection)}
                     onChange={(event) => {
-                      const [agent, session] = event.target.value.split('|');
-                      if (agent && session) setSelection({ agent, session });
+                      try {
+                        const [provider, agent, project, file] = JSON.parse(event.target.value) as string[];
+                        if (agent && file) {
+                          setSelection({
+                            provider,
+                            agent,
+                            project: project || null,
+                            session: file,
+                          });
+                        }
+                      } catch {
+                        // 忽略畸形 option value
+                      }
                     }}
                   >
                     {overview.sessions.map((session) => (
-                      <option key={`${session.agent}/${session.file}`} value={`${session.agent}|${session.file}`}>
-                        {session.agent} · {session.id.slice(0, 8)} · {formatDate(session.modified)}
+                      <option key={sessionOptionValue(session)} value={sessionOptionValue(session)}>
+                        {providerLabel(session.provider)} · {session.agent} · {session.id.slice(0, 8)} · {formatDate(session.modified)}
                       </option>
                     ))}
                   </select>
@@ -509,7 +553,8 @@ export default function App() {
               {selectedSession ? (
                 <div className="traj-session-meta">
                   <span>{formatBytes(selectedSession.sizeBytes)}</span>
-                  <span>{selectedSession.hasTrace ? 'trace ✓' : '无 trace'}</span>
+                  <span>{providerLabel(selectedSession.provider)}</span>
+                  <span>{selectedSession.hasTrace ? 'trace ✓' : selectedSession.provider === 'claude-code' ? 'JSONL' : '无 trace'}</span>
                   <span>{selectedSession.file}</span>
                 </div>
               ) : null}
@@ -588,7 +633,9 @@ export default function App() {
           <div className="traj-main-title">
             <strong>{overview?.name || 'Trajectory Viewer'}</strong>
             <span>
-              {selectedSession ? `${selectedSession.agent} / ${selectedSession.id}` : '消息流 · 原数据 · 交付物'}
+              {selectedSession
+                ? `${providerLabel(selectedSession.provider)} / ${selectedSession.agent} / ${selectedSession.id}`
+                : '消息流 · 原数据 · 交付物'}
             </span>
           </div>
           <div className="traj-main-actions">

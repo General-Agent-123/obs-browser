@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  claudeSessionEventsToMessages,
   collectHtmlDeliverables,
   collectWorkspaceFiles,
   extractSystemPrompt,
@@ -183,6 +184,55 @@ test('rewriteHtmlRootUrls prefixes absolute assets and leaves external urls alon
   assert.match(out, /srcset="\/trajectory\/files\/bucket\/task\/workspace\/app\/assets\/a\.png 1x, \/trajectory\/files\/bucket\/task\/workspace\/app\/assets\/b\.png 2x"/);
   assert.match(out, /url\(\/trajectory\/files\/bucket\/task\/workspace\/app\/assets\/bg\.png\)/);
   assert.match(out, /href="\/\/cdn\.example\/x"/);
+});
+
+test('claudeSessionEventsToMessages maps user/assistant/tool_result/meta events', () => {
+  const events = [
+    { type: 'user', message: { role: 'user', content: '做一个核电站页面' } },
+    {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '先看目录' },
+          { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'a\nb' }],
+      },
+    },
+    {
+      type: 'user',
+      isMeta: true,
+      message: { role: 'user', content: [{ type: 'text', text: 'skill context' }] },
+    },
+    {
+      type: 'user',
+      isCompactSummary: true,
+      message: { role: 'user', content: 'This session is being continued from a previous conversation' },
+    },
+    {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: '页面已完成' }] },
+    },
+  ];
+  const messages = claudeSessionEventsToMessages(events);
+  assert.deepEqual(messages.map((message) => message.role), [
+    'user', 'assistant', 'tool', 'system', 'system', 'assistant',
+  ]);
+  assert.equal(messages[1].reasoning_content, '先看目录');
+  assert.equal(messages[1].tool_calls[0].function.name, 'Bash');
+  assert.deepEqual(JSON.parse(messages[1].tool_calls[0].function.arguments), { command: 'ls' });
+  assert.equal(messages[2].tool_call_id, 'toolu_1');
+  assert.equal(messages[2].content, 'a\nb');
+  assert.equal(messages[3].label, '注入上下文 · Claude Code');
+  assert.equal(messages[4].label, '上下文压缩摘要 · Claude Code');
+  assert.equal(messages[5].content, '页面已完成');
 });
 
 test('objectPathFromReferer maps root assets to the deliverable directory', () => {

@@ -209,6 +209,117 @@ export function sessionEventsToMessages(events) {
   return messages.map((message, idx) => ({ ...message, idx }));
 }
 
+
+/** Claude Code tool_result.content 可能是字符串，也可能是 text/image block 数组 */
+function claudeToolResultText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => {
+        if (typeof block === 'string') return block;
+        if (!block || typeof block !== 'object') return '';
+        if (block.type === 'text') return block.text ?? '';
+        if (block.type === 'image') return '[image]';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (content == null) return '';
+  return String(content);
+}
+
+/**
+ * 把 Claude Code 的 session JSONL 转成 trajectory-viewer 的消息流。
+ *
+ * Claude Code 与 OpenClaw 的差异：
+ * - 记录是顶层 `type: user | assistant`，消息在 `message.content` block 数组里；
+ * - tool_result 放在 user 消息的 content block 中，而不是独立的 tool 消息；
+ * - `isMeta` 的 user 消息是注入上下文，压缩摘要也是 user，但更适合系统折叠卡。
+ */
+export function claudeSessionEventsToMessages(events) {
+  const messages = [];
+
+  for (const event of events) {
+    if (!event || !event.message) continue;
+    const message = event.message;
+
+    if (event.type === 'user') {
+      const content = message.content;
+      const isMeta = event.isMeta === true || message.isMeta === true;
+      const textBlocks = Array.isArray(content)
+        ? content.filter((block) => block?.type === 'text' && typeof block.text === 'string' && block.text)
+        : [];
+      const toolResults = Array.isArray(content)
+        ? content.filter((block) => block?.type === 'tool_result')
+        : [];
+      const rawText = typeof content === 'string'
+        ? content
+        : textBlocks.map((block) => block.text).join('\n');
+
+      if (rawText.trim()) {
+        const isContinuation = /^This session is being continued/i.test(rawText)
+          || event.isCompactSummary === true;
+        messages.push(makeMessage(isMeta || isContinuation ? 'system' : 'user', rawText, {
+          label: isContinuation
+            ? '上下文压缩摘要 · Claude Code'
+            : isMeta ? '注入上下文 · Claude Code' : null,
+        }));
+      }
+
+      for (const block of toolResults) {
+        let text = claudeToolResultText(block.content);
+        if (block.is_error && text && !/^error\b/i.test(text)) text = `Error: ${text}`;
+        messages.push(makeMessage('tool', text, {
+          tool_call_id: block.tool_use_id ?? null,
+        }));
+      }
+      continue;
+    }
+
+    if (event.type === 'assistant') {
+      const blocks = Array.isArray(message.content)
+        ? message.content
+        : [{ type: 'text', text: contentToText(message.content) }];
+      const textParts = [];
+      const reasoningParts = [];
+      const toolCalls = [];
+
+      for (const block of blocks) {
+        if (!block || typeof block !== 'object') {
+          if (typeof block === 'string' && block) textParts.push(block);
+          continue;
+        }
+        if (block.type === 'text' && typeof block.text === 'string' && block.text) {
+          textParts.push(block.text);
+        } else if (block.type === 'thinking' || block.type === 'reasoning') {
+          const reasoning = block.thinking ?? block.reasoning ?? block.text;
+          if (typeof reasoning === 'string' && reasoning) reasoningParts.push(reasoning);
+        } else if (block.type === 'tool_use' || block.type === 'toolCall') {
+          toolCalls.push({
+            id: String(block.id ?? block.toolCallId ?? `call_${messages.length}_${toolCalls.length}`),
+            type: 'function',
+            function: {
+              name: String(block.name ?? block.toolName ?? 'tool'),
+              arguments: toolArgumentsToString(block.input ?? block.arguments),
+            },
+          });
+        }
+      }
+
+      const content = textParts.join('\n');
+      const reasoning = reasoningParts.join('\n');
+      messages.push(makeMessage('assistant', content, {
+        reasoning_content: reasoning || null,
+        reasoning_len: reasoning.length,
+        tool_calls: toolCalls.length ? toolCalls : null,
+      }));
+    }
+  }
+
+  return messages.map((message, idx) => ({ ...message, idx }));
+}
+
 /** 从 trace 事件里提取 openclaw 系统提示（context.compiled / prompt.submitted） */
 export function extractSystemPrompt(traceEvents) {
   for (const event of traceEvents) {

@@ -1163,9 +1163,11 @@ const server = http.createServer(async (req, res) => {
       const folderPath = normalizeFolderPath(url.searchParams.get('path'));
       const agent = url.searchParams.get('agent') || 'main';
       const session = url.searchParams.get('session');
+      const provider = url.searchParams.get('provider') || 'openclaw';
+      const project = url.searchParams.get('project') || null;
       const from = url.searchParams.get('from') || '0';
       const limit = url.searchParams.get('limit') || '300';
-      const page = await trajectory.messages(folderPath, { agent, session, from, limit });
+      const page = await trajectory.messages(folderPath, { agent, session, provider, project, from, limit });
       sendJson(res, 200, page);
       return;
     }
@@ -1174,7 +1176,9 @@ const server = http.createServer(async (req, res) => {
       const folderPath = normalizeFolderPath(url.searchParams.get('path'));
       const agent = url.searchParams.get('agent') || 'main';
       const session = url.searchParams.get('session');
-      const raw = await trajectory.raw(folderPath, { agent, session });
+      const provider = url.searchParams.get('provider') || 'openclaw';
+      const project = url.searchParams.get('project') || null;
+      const raw = await trajectory.raw(folderPath, { agent, session, provider, project });
       sendJson(res, 200, raw);
       return;
     }

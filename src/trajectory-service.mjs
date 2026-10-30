@@ -14,6 +14,7 @@
 
 import { stripLogNoise } from './obsutil.mjs';
 import {
+  claudeSessionEventsToMessages,
   collectHtmlDeliverables,
   collectWorkspaceFiles,
   extractSystemPrompt,
@@ -135,7 +136,9 @@ export class TrajectoryService {
             .map((object) => object.name),
         );
         const sessions = sessionObjects.map((object) => ({
+          provider: 'openclaw',
           agent: agentName,
+          project: null,
           id: object.name.replace(/\.jsonl$/i, ''),
           file: object.name,
           path: object.path,
@@ -144,11 +147,70 @@ export class TrajectoryService {
           hasTrace: traceNames.has(object.name.replace(/\.jsonl$/i, '.trajectory.jsonl')),
         }));
         sessions.sort(sortByModifiedDesc);
-        return { name: agentName, path: agentFolder.path, sessions };
+        return { name: agentName, path: agentFolder.path, provider: 'openclaw', project: null, sessions };
       }),
     );
 
     agents.sort((a, b) => a.name.localeCompare(b.name));
+    const sessions = agents
+      .flatMap((agent) => agent.sessions)
+      .sort((a, b) => sortByModifiedDesc(a, b) || a.agent.localeCompare(b.agent));
+    return { agents, sessions };
+  }
+
+
+  /** 列出 Claude Code 的 projects/<project>/<session>.jsonl 会话 */
+  async listClaudeProjects(folderPath) {
+    const projectsRoot = joinFolder(folderPath, 'projects');
+    let listing;
+    try {
+      listing = await this.obs.list(projectsRoot, { limit: 200 });
+    } catch {
+      return { agents: [], sessions: [] };
+    }
+
+    const groups = await Promise.all(
+      listing.folders.map(async (projectFolder) => {
+        const project = projectFolder.name;
+        const agentName = /evaluator/i.test(project) ? 'evaluator' : 'main';
+        let sessionsListing = null;
+        try {
+          sessionsListing = await this.obs.list(projectFolder.path, { limit: 1000 });
+        } catch {
+          sessionsListing = null;
+        }
+        const sessions = (sessionsListing?.objects ?? [])
+          .filter((object) => /\.jsonl$/i.test(object.name))
+          .map((object) => ({
+            provider: 'claude-code',
+            agent: agentName,
+            project,
+            id: object.name.replace(/\.jsonl$/i, ''),
+            file: object.name,
+            path: object.path,
+            sizeBytes: object.sizeBytes,
+            modified: object.modified,
+            hasTrace: false,
+          }));
+        sessions.sort(sortByModifiedDesc);
+        return { name: agentName, path: projectFolder.path, provider: 'claude-code', project, sessions };
+      }),
+    );
+
+    // 同一 agent 可能对应多个 project 目录，合并为侧栏的一个 agent 分组
+    const byAgent = new Map();
+    for (const group of groups) {
+      const existing = byAgent.get(group.name);
+      if (existing) {
+        existing.sessions.push(...group.sessions);
+        existing.projects.push(group.project);
+      } else {
+        byAgent.set(group.name, { ...group, projects: [group.project] });
+      }
+    }
+    const agents = [...byAgent.values()].sort((a, b) => a.name.localeCompare(b.name));
+    for (const agent of agents) agent.sessions.sort(sortByModifiedDesc);
+
     const sessions = agents
       .flatMap((agent) => agent.sessions)
       .sort((a, b) => sortByModifiedDesc(a, b) || a.agent.localeCompare(b.agent));
@@ -251,9 +313,10 @@ export class TrajectoryService {
     const rootListing = await this.obs.list(folderPath, { limit: 1000 });
     const folderNames = new Set(rootListing.folders.map((folder) => folder.name));
     const hasAgents = folderNames.has('agents');
+    const hasProjects = folderNames.has('projects');
     const hasWorkspace = folderNames.has('workspace');
 
-    if (!hasAgents && !hasWorkspace) {
+    if (!hasAgents && !hasProjects && !hasWorkspace) {
       const value = {
         ok: false,
         reason: 'not-trajectory',
@@ -266,13 +329,18 @@ export class TrajectoryService {
       return value;
     }
 
-    const [agentListing, runs, workspace, evaluator] = await Promise.all([
+    const [openclawListing, claudeListing, runs, workspace, evaluator] = await Promise.all([
       hasAgents ? this.listAgents(folderPath) : Promise.resolve({ agents: [], sessions: [] }),
+      hasProjects ? this.listClaudeProjects(folderPath) : Promise.resolve({ agents: [], sessions: [] }),
       this.listRuns(folderPath),
       this.listDeliverables(folderPath, 'workspace', 'workspace'),
       this.listDeliverables(folderPath, 'workspace-evaluator', 'evaluator'),
     ]);
 
+    const agents = [...openclawListing.agents, ...claudeListing.agents]
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const sessions = [...openclawListing.sessions, ...claudeListing.sessions]
+      .sort((a, b) => sortByModifiedDesc(a, b) || a.agent.localeCompare(b.agent));
     const deliverables = [...workspace.items, ...evaluator.items];
     const files = [...workspace.files, ...evaluator.files];
     const value = {
@@ -281,9 +349,10 @@ export class TrajectoryService {
       name: displayName(folderPath),
       generatedAt: Date.now(),
       hasAgents,
+      hasProjects,
       hasWorkspace,
-      agents: agentListing.agents,
-      sessions: agentListing.sessions,
+      agents,
+      sessions,
       runs,
       stats: runs.stats,
       workspace: {
@@ -310,8 +379,22 @@ export class TrajectoryService {
     return value;
   }
 
-  /** 读取并缓存一条 agent session（含 trace 里的系统提示） */
-  async loadAgent(folderPath, agent, session) {
+  rememberAgent(sessionPath, value) {
+    this.agentCache.set(sessionPath, { at: Date.now(), value });
+    while (this.agentCache.size > MAX_AGENT_CACHE) {
+      this.agentCache.delete(this.agentCache.keys().next().value);
+    }
+  }
+
+  /** 读取并缓存一条 agent session；按 provider 分派 */
+  async loadAgent(folderPath, { agent, session, provider = 'openclaw', project = null } = {}) {
+    if (provider === 'claude-code') {
+      return this.loadClaudeAgent(folderPath, { agent, session, project });
+    }
+    return this.loadOpenClawAgent(folderPath, { agent, session });
+  }
+
+  async loadOpenClawAgent(folderPath, { agent, session }) {
     if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/.test(String(agent || ''))) {
       throw new Error('agent 名称不合法');
     }
@@ -342,6 +425,8 @@ export class TrajectoryService {
     if (!messages.length) throw new Error('该 session 没有可展示的消息');
 
     const value = {
+      provider: 'openclaw',
+      project: null,
       folderPath,
       agent,
       session,
@@ -355,20 +440,60 @@ export class TrajectoryService {
       systemPrompt,
       messages,
     };
-
-    this.agentCache.set(sessionPath, { at: Date.now(), value });
-    while (this.agentCache.size > MAX_AGENT_CACHE) {
-      this.agentCache.delete(this.agentCache.keys().next().value);
-    }
+    this.rememberAgent(sessionPath, value);
     return value;
   }
 
-  async messages(folderPath, { agent, session, from = 0, limit = 300 } = {}) {
-    const data = await this.loadAgent(folderPath, agent, session);
+  async loadClaudeAgent(folderPath, { agent, session, project }) {
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/.test(String(agent || ''))) {
+      throw new Error('agent 名称不合法');
+    }
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/.test(String(project || ''))) {
+      throw new Error('Claude project 名称不合法');
+    }
+    if (!/^[A-Za-z0-9._-]+\.jsonl$/i.test(String(session || ''))) {
+      throw new Error('session 文件名不合法');
+    }
+
+    const sessionPath = joinObject(joinFolder(joinFolder(folderPath, 'projects'), project), session);
+    const cached = this.agentCache.get(sessionPath);
+    if (cached && Date.now() - cached.at < AGENT_TTL) return cached.value;
+
+    const sessionText = await this.readTextObject(sessionPath);
+    const parsed = parseJsonLines(sessionText);
+    if (!parsed.events.length) throw new Error('该 Claude Code session 没有可解析的消息');
+
+    const messages = claudeSessionEventsToMessages(parsed.events);
+    if (!messages.length) throw new Error('该 Claude Code session 没有可展示的消息');
+
+    const value = {
+      provider: 'claude-code',
+      project,
+      folderPath,
+      agent,
+      session,
+      sessionPath,
+      tracePath: null,
+      hasTrace: false,
+      traceText: null,
+      sessionEvents: parsed.events,
+      traceEvents: [],
+      parseErrors: parsed.parseErrors,
+      systemPrompt: null,
+      messages,
+    };
+    this.rememberAgent(sessionPath, value);
+    return value;
+  }
+
+  async messages(folderPath, { agent, session, provider = 'openclaw', project = null, from = 0, limit = 300 } = {}) {
+    const data = await this.loadAgent(folderPath, { agent, session, provider, project });
     const start = Math.max(0, Number.parseInt(from, 10) || 0);
     const size = Math.min(300, Math.max(1, Number.parseInt(limit, 10) || 300));
     const slice = data.messages.slice(start, start + size);
     return {
+      provider: data.provider,
+      project: data.project,
       agent,
       session,
       from: start,
@@ -380,10 +505,12 @@ export class TrajectoryService {
   }
 
   /** 原数据视图：session 原始事件 + trace 摘要（去掉体积最大的 model.completed 快照） */
-  async raw(folderPath, { agent, session } = {}) {
-    const data = await this.loadAgent(folderPath, agent, session);
+  async raw(folderPath, { agent, session, provider = 'openclaw', project = null } = {}) {
+    const data = await this.loadAgent(folderPath, { agent, session, provider, project });
     const overviewValue = this.overviewCache.get(folderPath)?.value;
     return {
+      provider: data.provider,
+      project: data.project,
       folderPath,
       agent,
       session,

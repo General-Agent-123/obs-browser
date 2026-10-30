@@ -150,6 +150,78 @@ test('TrajectoryService overview/messages/raw work against an OBS-like source', 
   assert.ok(raw.traceEvents.every((event) => event.type !== 'model.completed'));
 });
 
+test('TrajectoryService reads Claude Code projects and paginates their sessions', async () => {
+  const obs = new FakeObs();
+  const project = '-home-ma-user--claude-workspace';
+  const claudeRoot = `${ROOT}projects/${project}/`;
+  const claudeSession = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'claude 问题' } }),
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '思考' },
+          { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'pwd' } },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '/home/ma-user/.claude/workspace' }],
+      },
+    }),
+  ].join('\n');
+  obs.files[`${claudeRoot}c1.jsonl`] = claudeSession;
+  obs.listings[ROOT].folders.push({ name: 'projects', path: `${ROOT}projects/`, type: 'folder' });
+  obs.listings[`${ROOT}projects/`] = {
+    folders: [{ name: project, path: claudeRoot, type: 'folder' }],
+    objects: [],
+  };
+  obs.listings[claudeRoot] = {
+    folders: [],
+    objects: [{ name: 'c1.jsonl', path: `${claudeRoot}c1.jsonl`, type: 'file', sizeBytes: 100, modified: '2026-10-27T00:00:00Z' }],
+  };
+
+  const service = new TrajectoryService(obs);
+  const overview = await service.overview(ROOT);
+  const claude = overview.sessions.find((session) => session.provider === 'claude-code');
+  assert.ok(claude);
+  assert.equal(claude.agent, 'main');
+  assert.equal(claude.project, project);
+  assert.equal(claude.file, 'c1.jsonl');
+  assert.equal(overview.sessions.length, 2);
+  assert.equal(overview.hasProjects, true);
+
+  const page = await service.messages(ROOT, {
+    provider: 'claude-code',
+    agent: 'main',
+    project,
+    session: 'c1.jsonl',
+    from: 0,
+    limit: 10,
+  });
+  assert.equal(page.provider, 'claude-code');
+  assert.equal(page.project, project);
+  assert.equal(page.total, 3);
+  assert.deepEqual(page.messages.map((message) => message.role), ['user', 'assistant', 'tool']);
+  assert.equal(page.messages[1].tool_calls[0].function.name, 'Bash');
+  assert.equal(page.messages[2].tool_call_id, 'toolu_1');
+
+  const raw = await service.raw(ROOT, {
+    provider: 'claude-code',
+    agent: 'main',
+    project,
+    session: 'c1.jsonl',
+  });
+  assert.equal(raw.provider, 'claude-code');
+  assert.equal(raw.project, project);
+  assert.equal(raw.traceFile, null);
+  assert.equal(raw.sessionEvents.length, 3);
+});
+
 test('TrajectoryService rejects a folder without agents/workspace', async () => {
   const obs = new FakeObs();
   obs.listings[ROOT].folders = [{ name: 'other', path: `${ROOT}other/`, type: 'folder' }];
