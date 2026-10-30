@@ -250,8 +250,26 @@ export class TrajectoryService {
       try {
         const text = await this.readTextObject(object.path);
         const lines = text.split('\n');
+        // 轮次按模型回复的 message.id 去重：一次模型回复算一轮。
+        // DSH 通常一条 assistant/message 就是一次回复，去重可避免事件重放/重试重复计数；
+        // 旧数据缺 id 时按事件条数兜底。
+        const assistantIds = new Set();
+        let assistantWithoutId = 0;
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (event?.type !== 'assistant/message') continue;
+          const id = event.data?.message?.id;
+          if (id) assistantIds.add(String(id));
+          else assistantWithoutId += 1;
+        }
         counts = {
-          assistantRounds: lines.filter((line) => line.includes('"type":"assistant/message"')).length,
+          assistantRounds: assistantIds.size + assistantWithoutId,
           toolCalls: lines.filter((line) => line.includes('"type":"tool/result"')).length,
         };
       } catch {

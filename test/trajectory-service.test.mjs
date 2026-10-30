@@ -316,6 +316,58 @@ test('TrajectoryService reads DSH session events and system prompt', async () =>
   assert.equal(raw.traceFile, null);
 });
 
+test('TrajectoryService counts DSH assistant rounds by unique message id', async () => {
+  const obs = new FakeObs();
+  const dshRoot = `${ROOT}logs/dsh_harness/home/sessions/`;
+  const project = 'main/query1_20261030T020000/--home-ma-user-.dsh-workspace--/main-query1_20261030T020000';
+  const sessionPath = `${dshRoot}${project}/session.jsonl`;
+  const dshSession = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: '统计轮数' }] } },
+    {
+      type: 'assistant/message',
+      data: {
+        message: {
+          id: 'msg-1',
+          content: [
+            { type: 'reasoning', text: '先看目录' },
+            { type: 'tool-call', id: 'call_1', name: 'bash', arguments: '{"command":"ls"}' },
+          ],
+        },
+      },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [{ type: 'tool-result', toolCallId: 'call_1', content: [{ type: 'text', text: 'app.js' }] }],
+        },
+      },
+    },
+    { type: 'assistant/message', data: { message: { id: 'msg-2', content: [{ type: 'text', text: '继续' }] } } },
+    // 同一次模型回复被重复写入时，不应重复计轮
+    { type: 'assistant/message', data: { message: { id: 'msg-2', content: [{ type: 'text', text: '继续' }] } } },
+  ].map((event) => JSON.stringify(event)).join('\n');
+
+  obs.files[sessionPath] = dshSession;
+  obs.files[`${ROOT}logs/1.log`] = '2026-10-30 02:00:00 [INFO] [Q] DSH query\n';
+  obs.files[`${ROOT}logs/traj_stats_result.json`] = JSON.stringify({
+    harness: 'dsh',
+    log_file: 'logs/1.log',
+    agents: [{ tool_calls: 0, assistant_rounds: 0 }],
+  });
+  delete obs.listings[`${ROOT}logs/trajectories/`];
+  obs.briefs[dshRoot] = {
+    objects: [{ path: sessionPath, name: 'session.jsonl' }],
+    nextMarker: null,
+  };
+
+  const service = new TrajectoryService(obs);
+  const overview = await service.overview(ROOT);
+  assert.equal(overview.ok, true);
+  assert.equal(overview.stats.harness, 'dsh');
+  assert.equal(overview.stats.agents[0].assistant_rounds, 2);
+});
+
 test('TrajectoryService rejects a folder without agents/workspace', async () => {
   const obs = new FakeObs();
   obs.listings[ROOT].folders = [{ name: 'other', path: `${ROOT}other/`, type: 'folder' }];
