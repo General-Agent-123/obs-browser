@@ -51,6 +51,31 @@ test('parseListOutput reads folders, objects, metadata and next marker', () => {
   assert.equal(parsed.reportedFileCount, 2);
 });
 
+test('parseListOutput reads next marker from obsutil >= 5.8 output (no "is")', () => {
+  // obsutil 5.8.9 起把 "Next marker is:" 改成了 "Next marker:"，旧正则匹配不到
+  // 会导致前端丢失"加载更多"按钮。这里用服务器上真实抓到的输出做回归样例。
+  const parsed = parseListOutput(`
+Start at 2026-11-03 13:03:02.612720394 +0000 UTC
+
+Listing objects .
+
+Folder list:
+obs://example-bucket/openclaw_trajs/
+obs://example-bucket/openclaw_trajs/0914_rubrics_oc_2_0914_1849/
+obs://example-bucket/openclaw_trajs/0916_mock_200x200/
+obs://example-bucket/openclaw_trajs/0916_mock_200x200_cfgA_wave1/
+obs://example-bucket/openclaw_trajs/
+
+Next marker: openclaw_trajs/0916_mock_200x200_cfgA_wave1/
+Folder number: 200
+File number: 0
+`);
+  assert.equal(parsed.nextMarker, 'openclaw_trajs/0916_mock_200x200_cfgA_wave1/');
+  assert.equal(parsed.reportedFolderCount, 200);
+  assert.equal(parsed.reportedFileCount, 0);
+  assert.equal(parsed.objects.length, 0);
+});
+
 test('parseListOutput handles an empty object list', () => {
   const parsed = parseListOutput(`
 Folder list:

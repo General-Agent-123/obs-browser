@@ -61,7 +61,8 @@ export function classifyObject(name, contentType = '') {
 }
 
 export function parseNextMarker(output) {
-  const match = stripLogNoise(output).match(/^Next marker is:\s*(.+?)\s*$/m);
+  // obsutil 5.8 起输出 "Next marker:"，旧版为 "Next marker is:"，两种都要兼容
+  const match = stripLogNoise(output).match(/^Next marker(?: is)?:\s*(.+?)\s*$/m);
   return match ? match[1] : null;
 }
 
@@ -82,7 +83,7 @@ export function parseListOutput(output) {
     folderBlock = clean.slice(folderHeader + 'Folder list:'.length);
   }
 
-  objectBlock = objectBlock.split(/\n(?:Next marker is:|Folder number:|File number:)/)[0];
+  objectBlock = objectBlock.split(/\n(?:Next marker(?: is)?:|Folder number:|File number:)/)[0];
 
   const folders = [];
   const seenFolders = new Set();
@@ -182,7 +183,7 @@ export function parseBriefListOutput(output) {
   }
 
   let objectBlock = clean.slice(objectHeader + 'Object list:'.length);
-  objectBlock = objectBlock.split(/\n(?:Next marker is:|Folder number:|File number:)/)[0];
+  objectBlock = objectBlock.split(/\n(?:Next marker(?: is)?:|Folder number:|File number:)/)[0];
 
   const objects = [];
   const seen = new Set();
