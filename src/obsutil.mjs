@@ -917,6 +917,61 @@ export class ObsutilService {
     return match[0];
   }
 
+  /**
+   * 读取文本对象内容。obsutil 的 cat 只支持 10MB 以内的对象，
+   * 更大的对象会报 "The file size [...] is too large, the supported maximum size is 10MB"，
+   * 这里对超过上限的对象改走 cp 下载到临时文件再读，容量上限由调用方的 maxBytes 控制。
+   */
+  async catText(objectPath, { timeoutMs = 90_000, maxBytes = 24 * 1024 * 1024, signal = null } = {}) {
+    const CAT_MAX_BYTES = 10 * 1024 * 1024; // obsutil cat 的硬性大小上限
+    const stat = await this.stat(objectPath).catch(() => null);
+    const sizeBytes = stat?.sizeBytes ?? null;
+
+    // 已知大小且在 cat 支持范围内：直接 cat
+    if (sizeBytes != null && sizeBytes <= CAT_MAX_BYTES) {
+      const { stdout } = await this.run(['cat', objectPath], { timeoutMs, maxBytes, signal });
+      return stdout;
+    }
+
+    // 已知大小但超过调用方上限：不必白跑一次下载，直接报错
+    if (sizeBytes != null && sizeBytes > maxBytes) {
+      throw new ObsutilError(`对象大小 ${stat.sizeLabel ?? `${sizeBytes}B`} 超过可读取上限`);
+    }
+
+    // 大小未知时先试一次 cat，撞到尺寸限制再退回下载
+    if (sizeBytes == null) {
+      try {
+        const { stdout } = await this.run(['cat', objectPath], { timeoutMs, maxBytes, signal });
+        return stdout;
+      } catch (error) {
+        if (!/is too large|maximum size/i.test(String(error?.message))) throw error;
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'obs-explorer-cat-'));
+    try {
+      const target = path.join(tempDir, 'object');
+      await this.downloadToFile(objectPath, target, { timeoutMs, signal });
+      const bytes = await fs.readFile(target);
+      if (bytes.length > maxBytes) {
+        throw new ObsutilError(`对象内容超过可读取上限（${bytes.length} 字节）`);
+      }
+      return bytes.toString('utf8');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** 通过 cp 把对象下载到本地文件，供 catText 读取超过 cat 上限的大对象 */
+  async downloadToFile(objectPath, targetPath, { timeoutMs = 300_000, signal = null, checkpointDir = null } = {}) {
+    const cpd = checkpointDir ?? (await this.ensureLocalDir('.checkpoint'));
+    return this.run(['cp', objectPath, targetPath, `-cpd=${cpd}`], {
+      timeoutMs,
+      maxBytes: 8 * 1024 * 1024,
+      signal,
+    });
+  }
+
   async preview(objectPath) {
     let stat = await this.stat(objectPath);
     if (stat.type === 'folder') {

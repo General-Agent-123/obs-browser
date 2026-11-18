@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import {
   classifyObject,
   compileFilenameMatcher,
   createListingCounter,
   humanToBytes,
+  ObsutilError,
   ObsutilService,
   parseBriefListOutput,
   parseBuckets,
@@ -368,4 +370,88 @@ test('ObsutilService caches entry counts but not truncated ones', async () => {
   await service.countEntries(folder, { maxEntries: 100 });
   await service.countEntries(folder, { maxEntries: 100 });
   assert.equal(calls, 5, 'truncated counts must not be cached');
+});
+
+test('ObsutilService catText keeps using cat for objects within the cat size cap', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  const commands = [];
+  service.stat = async () => ({ key: 'x', type: 'file', sizeBytes: 2384, sizeLabel: '2384B' });
+  service.run = async (args) => {
+    commands.push(args[0]);
+    return { stdout: 'small text', stderr: '' };
+  };
+
+  const text = await service.catText('obs://example-bucket/task/small.jsonl', { maxBytes: 50 * 1024 * 1024 });
+  assert.equal(text, 'small text');
+  assert.deepEqual(commands, ['cat']);
+});
+
+test('ObsutilService catText downloads objects larger than the cat size cap', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  const commands = [];
+  service.stat = async () => ({ key: 'x', type: 'file', sizeBytes: 15_034_159, sizeLabel: '14.33MB' });
+  service.run = async (args) => {
+    commands.push(args[0]);
+    throw new Error(`unexpected command ${args[0]}`);
+  };
+  service.downloadToFile = async (objectPath, targetPath) => {
+    commands.push('download');
+    assert.equal(objectPath, 'obs://example-bucket/task/big.jsonl');
+    await fs.writeFile(targetPath, 'large body', 'utf8');
+  };
+
+  const text = await service.catText('obs://example-bucket/task/big.jsonl', { maxBytes: 50 * 1024 * 1024 });
+  assert.equal(text, 'large body');
+  assert.deepEqual(commands, ['download'], 'oversized objects should skip cat entirely');
+});
+
+test('ObsutilService catText falls back to download when cat hits the size cap', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  const commands = [];
+  service.stat = async () => null;
+  service.run = async (args) => {
+    commands.push(args[0]);
+    // 模拟 obsutil cat 对大对象的报错
+    throw new ObsutilError('Error: The file size [15034159] is too large, the supported maximum size is 10MB');
+  };
+  service.downloadToFile = async (_objectPath, targetPath) => {
+    commands.push('download');
+    await fs.writeFile(targetPath, 'downloaded body', 'utf8');
+  };
+
+  const text = await service.catText('obs://example-bucket/task/big.jsonl', { maxBytes: 50 * 1024 * 1024 });
+  assert.equal(text, 'downloaded body');
+  assert.deepEqual(commands, ['cat', 'download']);
+});
+
+test('ObsutilService catText rethrows cat errors unrelated to size', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  service.stat = async () => null;
+  service.run = async () => {
+    throw new ObsutilError('Error: Status [404], error code [NoSuchObject]');
+  };
+  service.downloadToFile = async () => {
+    throw new Error('should not download');
+  };
+
+  await assert.rejects(
+    () => service.catText('obs://example-bucket/task/missing.jsonl', { maxBytes: 50 * 1024 * 1024 }),
+    /NoSuchObject/,
+  );
+});
+
+test('ObsutilService catText rejects oversized objects without downloading', async () => {
+  const service = new ObsutilService({ bin: 'obsutil' });
+  let ran = false;
+  service.stat = async () => ({ key: 'x', type: 'file', sizeBytes: 60 * 1024 * 1024, sizeLabel: '60MB' });
+  service.run = async () => {
+    ran = true;
+    return { stdout: '', stderr: '' };
+  };
+
+  await assert.rejects(
+    () => service.catText('obs://example-bucket/task/huge.jsonl', { maxBytes: 50 * 1024 * 1024 }),
+    /上限/,
+  );
+  assert.equal(ran, false, 'oversized objects should fail before any obsutil call');
 });

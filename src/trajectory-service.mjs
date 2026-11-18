@@ -29,8 +29,10 @@ import {
 
 const OVERVIEW_TTL = 30_000;
 const AGENT_TTL = 5 * 60_000;
-const MAX_SESSION_BYTES = 64 * 1024 * 1024;
-const MAX_TRACE_BYTES = 64 * 1024 * 1024;
+// obsutil cat 只支持 10MB 以内的对象，catText 会对更大的对象退回 cp 下载再读，
+// 这里的上限是真正的读取上限（会话/trace 支持 50MB）。
+const MAX_SESSION_BYTES = 50 * 1024 * 1024;
+const MAX_TRACE_BYTES = 50 * 1024 * 1024;
 const MAX_RECURSIVE_PAGES = 40;
 const MAX_AGENT_CACHE = 6;
 const MAX_SIGNED_CACHE = 500;
@@ -73,9 +75,9 @@ export class TrajectoryService {
     this.signedCache = new Map();
   }
 
-  /** 读取文本对象；obsutil cat 的日志噪声统一剥掉 */
+  /** 读取文本对象；catText 会自动绕开 obsutil cat 的 10MB 限制，日志噪声统一剥掉 */
   async readTextObject(objectPath, maxBytes = MAX_SESSION_BYTES) {
-    const { stdout } = await this.obs.run(['cat', objectPath], {
+    const stdout = await this.obs.catText(objectPath, {
       timeoutMs: 90_000,
       maxBytes,
     });

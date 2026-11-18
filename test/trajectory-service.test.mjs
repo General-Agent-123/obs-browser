@@ -75,11 +75,11 @@ class FakeObs {
     };
   }
 
-  async run(args) {
-    if (args[0] !== 'cat') throw new Error(`unexpected command ${args[0]}`);
-    const content = this.files[args[1]];
+  async catText(objectPath, { maxBytes = Number.POSITIVE_INFINITY } = {}) {
+    const content = this.files[objectPath];
     if (content == null) throw new Error('object not found');
-    return { stdout: content, stderr: '', code: 0 };
+    if (content.length > maxBytes) throw new Error('object too large');
+    return content;
   }
 
   async list(folder) {
