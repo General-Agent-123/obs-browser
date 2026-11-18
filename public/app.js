@@ -1,6 +1,12 @@
 const FALLBACK_PATH =
   'obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_frontend_scientific_mechanism_oc/task_configs/';
 const PAGE_SIZE = 200;
+// 全量搜索翻页时单页拉取的条目数；/api/list 服务端上限也是 1000
+const FULL_SEARCH_PAGE_SIZE = 1000;
+// 全量搜索匹配项过多时列表最多渲染的行数，超出部分以提示行代替，避免上万行 DOM 拖垮页面
+const FULL_SEARCH_RENDER_LIMIT = 2000;
+// 搜索运行中两次渲染之间的最小间隔；页到达比这更快时合并渲染
+const FULL_SEARCH_RENDER_INTERVAL_MS = 400;
 const BATCH_MAX_ITEMS = 200;
 const PINNED_KEY = 'obs-explorer:pinned:v1';
 const RECENT_KEY = 'obs-explorer:recent:v1';
@@ -80,6 +86,18 @@ const state = {
     controller: null,
     maxResults: 0,
     maxScan: 0,
+  },
+  // 当前层全量搜索（非递归）：回车触发，逐页拉取未加载分页后本地过滤
+  fullSearch: {
+    status: 'idle',
+    query: '',
+    path: null,
+    controller: null,
+    pages: 0,
+    startedAt: 0,
+    elapsedMs: 0,
+    matched: 0,
+    error: null,
   },
   sortKey: 'name',
   sortDir: 1,
@@ -342,6 +360,8 @@ async function loadPath(input, { force = false, resetView = true, history = 'pus
   abortSearchStream();
   state.recursive = false;
   state.search = blankSearch();
+  abortFullSearch();
+  state.fullSearch = blankFullSearch();
   state.selected.clear();
   state.path = target;
   state.loading = true;
@@ -401,6 +421,23 @@ async function loadPath(input, { force = false, resetView = true, history = 'pus
   }
 }
 
+/** 把一页列举结果按 path 去重后并入当前目录条目，并刷新计数。 */
+function mergeListedEntries(entries) {
+  const seen = new Set(state.entries.map((entry) => entry.path));
+  for (const entry of entries) {
+    if (!seen.has(entry.path)) {
+      state.entries.push(entry);
+      seen.add(entry.path);
+    }
+  }
+  state.folders = state.entries.filter((entry) => entry.type === 'folder').length;
+  state.objects = state.entries.filter((entry) => entry.type === 'file').length;
+  state.totalBytes = state.entries
+    .filter((entry) => entry.type === 'file')
+    .reduce((sum, object) => sum + (object.sizeBytes || 0), 0);
+  state.lastSync = new Date();
+}
+
 async function loadMore() {
   if (!state.nextMarker || state.loading || state.loadingMore) return;
   state.loadingMore = true;
@@ -411,20 +448,8 @@ async function loadMore() {
     const data = await fetchJson(
       `/api/list?path=${encodeURIComponent(state.path)}&limit=${PAGE_SIZE}&marker=${encodeURIComponent(state.nextMarker)}`,
     );
-    const seen = new Set(state.entries.map((entry) => entry.path));
-    for (const entry of data.entries) {
-      if (!seen.has(entry.path)) {
-        state.entries.push(entry);
-        seen.add(entry.path);
-      }
-    }
+    mergeListedEntries(data.entries);
     state.nextMarker = data.nextMarker;
-    state.folders = state.entries.filter((entry) => entry.type === 'folder').length;
-    state.objects = state.entries.filter((entry) => entry.type === 'file').length;
-    state.totalBytes = state.entries
-      .filter((entry) => entry.type === 'file')
-      .reduce((sum, object) => sum + (object.sizeBytes || 0), 0);
-    state.lastSync = new Date();
   } catch (error) {
     if (error.name !== 'AbortError') showToast(`加载更多失败：${error.message}`, true);
   } finally {
@@ -522,15 +547,23 @@ function abortSearchStream() {
 function renderSearchMode() {
   dom.searchField.classList.toggle('is-recursive', state.recursive);
   dom.recursiveToggle.setAttribute('aria-pressed', String(state.recursive));
+  // 普通模式：输入框内容与生效查询词不一致时高亮，提示按 Enter 应用
+  const pending =
+    !state.recursive && dom.searchInput.value.trim() !== state.query;
+  dom.searchField.classList.toggle('is-pending', pending);
   dom.searchInput.placeholder = state.recursive
     ? '输入文件名，Enter 递归搜索'
-    : '搜索当前目录';
+    : '搜索当前目录，Enter 全量搜索';
   dom.searchInput.setAttribute(
     'aria-label',
     state.recursive ? '递归搜索文件名' : '搜索当前目录',
   );
-  dom.searchShortcut.textContent = state.recursive ? '↵' : '/';
-  dom.searchShortcut.title = state.recursive ? '按 Enter 开始递归搜索' : '按 / 聚焦搜索';
+  dom.searchShortcut.textContent = state.recursive ? '↵' : pending ? '↵' : '/';
+  dom.searchShortcut.title = state.recursive
+    ? '按 Enter 开始递归搜索'
+    : pending
+      ? '按 Enter 应用当前输入并全量搜索'
+      : '按 Enter 全量搜索当前目录（含未加载分页）';
 }
 
 function renderSearchUI({ resetScroll = false } = {}) {
@@ -544,6 +577,9 @@ function renderSearchUI({ resetScroll = false } = {}) {
 
 function toggleRecursiveSearch() {
   clearSelection();
+  // 进入/离开递归模式都结束当前层全量搜索，避免后台翻页与递归搜索互相干扰
+  abortFullSearch();
+  state.fullSearch = blankFullSearch();
   if (state.recursive) {
     abortSearchStream();
     state.recursive = false;
@@ -554,7 +590,9 @@ function toggleRecursiveSearch() {
   }
 
   state.recursive = true;
-  const query = state.query.trim();
+  // 切入递归模式时以输入框当前内容为准（普通模式输入不再实时同步 state.query）
+  const query = dom.searchInput.value.trim();
+  state.query = query;
   state.search = blankSearch(
     query ? { status: 'prompt', query } : {},
   );
@@ -567,17 +605,31 @@ function toggleRecursiveSearch() {
 }
 
 function handleSearchInput() {
-  state.query = dom.searchInput.value;
-  clearSelection();
   if (!state.recursive) {
-    renderTitle();
-    renderFilters();
-    renderRows({ resetScroll: true });
-    renderSearchBanner();
-    renderStatus();
+    // 输入过程列表保持不动，避免被误解为即时搜索；按 Enter 才开始全量搜索。
+    // 只有清空输入框时才结束搜索、恢复完整列表。
+    const value = dom.searchInput.value;
+    renderSearchMode();
+    if (!value.trim()) {
+      const hadQuery = Boolean(state.query) || state.fullSearch.status !== 'idle';
+      abortFullSearch();
+      state.fullSearch = blankFullSearch();
+      if (hadQuery || state.query) {
+        state.query = '';
+        clearSelection();
+        renderSearchMode();
+        renderTitle();
+        renderFilters();
+        renderRows({ resetScroll: true });
+        renderSearchBanner();
+        renderStatus();
+      }
+    }
     return;
   }
 
+  state.query = dom.searchInput.value;
+  clearSelection();
   abortSearchStream();
   const query = state.query.trim();
   state.search = blankSearch(query ? { status: 'prompt', query } : {});
@@ -588,11 +640,13 @@ function handleSearchInput() {
 
 function clearRecursiveSearch() {
   abortSearchStream();
+  abortFullSearch();
   clearSelection();
   state.recursive = false;
   state.query = '';
   dom.searchInput.value = '';
   state.search = blankSearch();
+  state.fullSearch = blankFullSearch();
   renderSearchMode();
   renderSearchUI({ resetScroll: true });
   dom.searchInput.blur();
@@ -605,9 +659,158 @@ function stopRecursiveSearch() {
   renderSearchUI();
 }
 
+/* Full-directory search（当前层全量搜索）------------------------------------ */
+
+function blankFullSearch(overrides = {}) {
+  return {
+    status: 'idle',
+    query: '',
+    path: null,
+    controller: null,
+    pages: 0,
+    startedAt: 0,
+    elapsedMs: 0,
+    matched: 0,
+    error: null,
+    ...overrides,
+  };
+}
+
+function abortFullSearch() {
+  const task = state.fullSearch;
+  const controller = task?.controller;
+  if (!controller) return;
+  task.controller = null;
+  controller.abort();
+}
+
+function stopFullSearch() {
+  const task = state.fullSearch;
+  if (task.status !== 'running' || !task.controller) return;
+  task.status = 'cancelled';
+  task.elapsedMs = task.startedAt ? Date.now() - task.startedAt : 0;
+  abortFullSearch();
+}
+
+function startFullSearch() {
+  if (state.recursive) return;
+  if (state.loading) {
+    showToast('目录仍在加载，请稍后再试', true);
+    return;
+  }
+  // 查询词以 Enter 时刻的输入框内容为准（输入过程不实时生效）
+  const query = dom.searchInput.value.trim();
+  if (!query) {
+    showToast('请输入要搜索的名称', true);
+    dom.searchInput.focus();
+    return;
+  }
+  state.query = query;
+
+  // 重入时中止旧任务即可：已拉取的条目保留，翻页会从 nextMarker 继续
+  abortFullSearch();
+  clearSelection();
+  if (state.inspector.open) closeInspector({ silent: true });
+
+  const task = blankFullSearch({
+    status: 'running',
+    query,
+    path: state.path,
+    controller: new AbortController(),
+    startedAt: Date.now(),
+  });
+  state.fullSearch = task;
+  renderRows({ resetScroll: true });
+  renderSearchMode();
+  renderSearchBanner();
+  renderTitle();
+  renderStatus();
+  runFullSearch(task);
+}
+
+async function runFullSearch(task) {
+  const controller = task.controller;
+  let lastRenderAt = 0;
+  let pendingRender = false;
+  try {
+    while (!controller.signal.aborted && state.fullSearch === task) {
+      if (!state.nextMarker) {
+        task.status = 'done';
+        break;
+      }
+      const marker = state.nextMarker;
+      const data = await fetchJson(
+        `/api/list?path=${encodeURIComponent(state.path)}&limit=${FULL_SEARCH_PAGE_SIZE}&marker=${encodeURIComponent(marker)}`,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || state.fullSearch !== task) return;
+
+      mergeListedEntries(data.entries);
+      state.nextMarker = data.nextMarker;
+      task.pages += 1;
+      task.elapsedMs = Date.now() - task.startedAt;
+      const isLastPage = !data.nextMarker;
+
+      if (task.matched >= FULL_SEARCH_RENDER_LIMIT && !isLastPage) {
+        // 匹配数已到渲染上限：行列表封顶，只刷新计数与文本，不再重建上万行
+        state.fullSearch.matched = visibleEntries().length;
+        renderSearchBanner();
+        renderStatus();
+      } else if (
+        isLastPage
+        || !lastRenderAt
+        || Date.now() - lastRenderAt >= FULL_SEARCH_RENDER_INTERVAL_MS
+      ) {
+        // 最后一页始终渲染，保证数据完整上屏；其余页按最小间隔节流合并渲染
+        renderRows();
+        renderSearchBanner();
+        renderTitle();
+        renderStatus();
+        lastRenderAt = Date.now();
+        pendingRender = false;
+      } else {
+        pendingRender = true;
+      }
+
+      if (isLastPage) {
+        task.status = 'done';
+        break;
+      }
+      if (data.nextMarker === marker) {
+        task.status = 'error';
+        task.error = '分页标记未前进，已停止加载';
+        break;
+      }
+    }
+  } catch (error) {
+    if (controller.signal.aborted || state.fullSearch !== task) return;
+    task.status = 'error';
+    task.error = error.message;
+  } finally {
+    // 结束（完成/停止/出错）时行 DOM 与最后一次页渲染一致，无需重建；
+    // 只更新状态标记与文案，避免完成瞬间再闪一次入场动画。
+    // 注意不能在这里移除 is-searching：.file-row 基础样式是 opacity: 0，
+    // class 留到下一次 renderRows 重建行时再随 toggle 移除（旧行被丢弃，不会重放）。
+    if (state.fullSearch === task) {
+      task.controller = null;
+      task.elapsedMs = task.startedAt ? Date.now() - task.startedAt : 0;
+      dom.tableScroll.setAttribute('aria-busy', 'false');
+      if (pendingRender) {
+        renderRows();
+        pendingRender = false;
+      }
+      renderLoadMore();
+      renderSearchBanner();
+      renderTitle();
+      renderStatus();
+    }
+  }
+}
+
 async function startRecursiveSearch() {
   if (!state.recursive) return;
-  const query = state.query.trim();
+  // 以 Enter 时刻输入框内容为准，避免依赖输入过程中同步的旧值
+  const query = dom.searchInput.value.trim();
   if (!query) {
     showToast('请输入要搜索的文件名', true);
     dom.searchInput.focus();
@@ -775,13 +978,85 @@ function searchStatsText() {
   return text;
 }
 
+function hideSearchBanner() {
+  dom.searchBanner.hidden = true;
+  dom.searchActionButton.hidden = true;
+}
+
 function renderSearchBanner() {
-  if (!state.recursive || state.search.status === 'idle') {
-    dom.searchBanner.hidden = true;
+  if (state.recursive) {
+    if (state.search.status === 'idle') {
+      hideSearchBanner();
+      return;
+    }
+    renderRecursiveSearchBanner();
+    return;
+  }
+  if (state.fullSearch.status !== 'idle') {
+    renderFullSearchBanner();
+    return;
+  }
+  hideSearchBanner();
+}
+
+function fullSearchStatsText() {
+  const task = state.fullSearch;
+  const scanned = state.entries.length.toLocaleString('zh-CN');
+  // matched 由 renderRows 在渲染时缓存，避免这里重复对全量条目排序
+  const matched = task.matched.toLocaleString('zh-CN');
+  if (task.status === 'running') {
+    const totalText = state.count.status === 'done' ? ` · 共 ${formatTotalCount(state.count)} 项` : '';
+    return `已扫描 ${scanned} 项${totalText} · 匹配 ${matched} 项`;
+  }
+  const elapsed = formatDuration(task.elapsedMs);
+  if (task.status === 'done') {
+    return `当前目录共 ${scanned} 项 · 匹配 ${matched} 项 · ${elapsed}`;
+  }
+  return `已扫描 ${scanned} 项 · 匹配 ${matched} 项 · ${elapsed}`;
+}
+
+function renderFullSearchBanner() {
+  const task = state.fullSearch;
+  const matched = task.matched;
+  dom.searchBanner.hidden = false;
+  dom.searchBanner.className = `search-banner is-${task.status}`;
+  dom.searchBannerQuery.textContent = task.query ? `“${task.query}”` : '';
+  dom.searchActionButton.hidden = false;
+
+  if (task.status === 'running') {
+    dom.searchBannerIcon.innerHTML = '<span class="search-spinner"></span>';
+    dom.searchBannerTitle.textContent = '正在搜索当前目录';
+    dom.searchBannerStats.textContent = fullSearchStatsText();
+    dom.searchActionButton.textContent = '停止';
+    dom.searchActionButton.dataset.searchAction = 'stop';
+    return;
+  }
+
+  if (task.status === 'done') {
+    dom.searchBannerIcon.innerHTML = svg(matched ? 'check' : 'search');
+    dom.searchBannerTitle.textContent = matched ? '全量搜索完成' : '未找到匹配项';
+    dom.searchBannerStats.textContent = fullSearchStatsText();
     dom.searchActionButton.hidden = true;
     return;
   }
 
+  if (task.status === 'cancelled') {
+    dom.searchBannerIcon.innerHTML = svg('alert');
+    dom.searchBannerTitle.textContent = '搜索已停止';
+    dom.searchBannerStats.textContent = fullSearchStatsText();
+    dom.searchActionButton.textContent = '继续搜索';
+    dom.searchActionButton.dataset.searchAction = 'start';
+    return;
+  }
+
+  dom.searchBannerIcon.innerHTML = svg('alert');
+  dom.searchBannerTitle.textContent = '搜索失败';
+  dom.searchBannerStats.textContent = task.error || '发生未知错误';
+  dom.searchActionButton.textContent = '重试';
+  dom.searchActionButton.dataset.searchAction = 'start';
+}
+
+function renderRecursiveSearchBanner() {
   const search = state.search;
   dom.searchBanner.hidden = false;
   dom.searchBanner.className = `search-banner is-${search.status}`;
@@ -834,8 +1109,13 @@ function renderSearchBanner() {
 
 function handleSearchAction() {
   const action = dom.searchActionButton.dataset.searchAction;
-  if (action === 'stop') stopRecursiveSearch();
-  else startRecursiveSearch();
+  if (state.recursive) {
+    if (action === 'stop') stopRecursiveSearch();
+    else startRecursiveSearch();
+    return;
+  }
+  if (action === 'stop') stopFullSearch();
+  else startFullSearch();
 }
 
 function getEntryByPath(path) {
@@ -2204,9 +2484,20 @@ function renderRows({ resetScroll = false } = {}) {
   const search = state.search;
   rows.replaceChildren();
   dom.tableRegion.classList.toggle('is-search-results', searchView);
+  // 全量搜索任务存活期间（含补渲染）行会被反复重建，动画瞬时完成避免整表闪烁；
+  // class 留到任务结束后的下一次 renderRows 重建行时才移除（旧行被丢弃，不会重放）
+  dom.tableRegion.classList.toggle(
+    'is-searching',
+    !searchView && state.fullSearch.status !== 'idle',
+  );
   dom.tableScroll.setAttribute(
     'aria-busy',
-    String(state.loading || state.loadingMore || search.status === 'running'),
+    String(
+      state.loading
+        || state.loadingMore
+        || search.status === 'running'
+        || (!searchView && state.fullSearch.status === 'running'),
+    ),
   );
 
   if (searchView) {
@@ -2226,6 +2517,7 @@ function renderRows({ resetScroll = false } = {}) {
     );
   } else {
     const visible = visibleEntries();
+    if (!searchView) state.fullSearch.matched = visible.length;
     if (!visible.length) {
       const filtered = Boolean(state.query || state.filter !== 'all');
       rows.append(
@@ -2240,10 +2532,22 @@ function renderRows({ resetScroll = false } = {}) {
         }),
       );
     } else {
+      // 搜索过滤的匹配项过多时只渲染前 N 行，避免上万行 DOM 拖垮页面
+      const truncated = Boolean(state.query) && visible.length > FULL_SEARCH_RENDER_LIMIT;
+      const shown = truncated ? visible.slice(0, FULL_SEARCH_RENDER_LIMIT) : visible;
       const fragment = document.createDocumentFragment();
-      visible.forEach((entry, index) => {
+      shown.forEach((entry, index) => {
         fragment.append(makeRow(entry, index));
       });
+      if (truncated) {
+        fragment.append(
+          makeState({
+            kind: 'empty',
+            title: `仅显示前 ${FULL_SEARCH_RENDER_LIMIT.toLocaleString('zh-CN')} 项匹配`,
+            message: `当前关键词共匹配 ${visible.length.toLocaleString('zh-CN')} 项。请细化关键词或点击表头排序后滚动查看。`,
+          }),
+        );
+      }
       rows.append(fragment);
     }
   }
@@ -2407,7 +2711,10 @@ function makeRow(entry, index) {
   row.tabIndex = 0;
   row.setAttribute('role', 'row');
   row.setAttribute('aria-label', `${isFolder ? '文件夹' : '对象'} ${entry.name}`);
-  row.style.animationDelay = `${Math.min(index * 9, 160)}ms`;
+  // 全量搜索任务存活期间行会被反复重建：跳过级联入场延迟，配合 0s 动画时长避免闪烁
+  if (state.fullSearch.status === 'idle') {
+    row.style.animationDelay = `${Math.min(index * 9, 160)}ms`;
+  }
   if (state.selectedPath === entry.path) row.classList.add('is-selected');
 
   const selectCell = document.createElement('div');
@@ -2545,7 +2852,13 @@ function makeState({ kind, title, message, detail = '', action, actionLabel }) {
 }
 
 function renderLoadMore() {
-  const show = Boolean(state.nextMarker) && !state.loading && !state.error && !isSearchView();
+  // 全量搜索运行时翻页由搜索接管，隐藏手动「加载更多」
+  const show =
+    Boolean(state.nextMarker)
+    && !state.loading
+    && !state.error
+    && !isSearchView()
+    && state.fullSearch.status !== 'running';
   dom.loadMoreWrap.hidden = !show;
   dom.loadMoreButton.disabled = state.loadingMore;
   dom.loadMoreButton.innerHTML = state.loadingMore
@@ -2569,7 +2882,9 @@ function renderStatus() {
   const searchView = isSearchView();
   const searching = searchView && search.status === 'running';
   const searchFailed = searchView && search.status === 'error';
-  const busy = state.loading || state.loadingMore || searching;
+  const fullSearching = !searchView && state.fullSearch.status === 'running';
+  const fullSearchFailed = !searchView && state.fullSearch.status === 'error';
+  const busy = state.loading || state.loadingMore || searching || fullSearching;
   dom.progressTrack.classList.toggle('is-active', busy);
   dom.topRefreshButton.classList.toggle('is-spinning', busy);
   dom.topRefreshButton.disabled = busy;
@@ -2577,7 +2892,7 @@ function renderStatus() {
   dom.uploadButton.disabled = busy || Boolean(state.error) || isSearchView();
   dom.newFolderButton.disabled = busy || Boolean(state.error) || isSearchView();
   dom.footDot.className = `foot-dot ${
-    state.error || searchFailed ? 'is-error' : busy ? 'is-busy' : 'is-ready'
+    state.error || searchFailed || fullSearchFailed ? 'is-error' : busy ? 'is-busy' : 'is-ready'
   }`;
 
   if (searching) dom.footStatus.textContent = '正在递归搜索对象';
@@ -2587,7 +2902,14 @@ function renderStatus() {
     dom.footStatus.textContent = `搜索已停止 · ${search.items.length} 条匹配`;
   } else if (searchFailed) dom.footStatus.textContent = '递归搜索失败';
   else if (searchView && search.status === 'prompt') dom.footStatus.textContent = '等待开始递归搜索';
-  else if (state.loadingMore) dom.footStatus.textContent = '正在加载更多对象';
+  else if (fullSearching) {
+    dom.footStatus.textContent = `正在搜索当前目录 · 已扫描 ${state.entries.length.toLocaleString('zh-CN')} 项`;
+  } else if (fullSearchFailed) dom.footStatus.textContent = '全量搜索失败';
+  else if (!searchView && state.fullSearch.status === 'cancelled') {
+    dom.footStatus.textContent = `搜索已停止 · 已扫描 ${state.entries.length.toLocaleString('zh-CN')} 项`;
+  } else if (!searchView && state.fullSearch.status === 'done' && state.query) {
+    dom.footStatus.textContent = `全量搜索完成 · 已加载 ${state.entries.length.toLocaleString('zh-CN')} 项`;
+  } else if (state.loadingMore) dom.footStatus.textContent = '正在加载更多对象';
   else if (state.loading) dom.footStatus.textContent = '正在通过 obsutil 同步目录';
   else if (state.error) dom.footStatus.textContent = '目录同步失败';
   else {
@@ -3511,10 +3833,12 @@ function bindEvents() {
 
   dom.searchInput.addEventListener('input', handleSearchInput);
   dom.searchInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && state.recursive) {
-      event.preventDefault();
-      startRecursiveSearch();
-    }
+    if (event.key !== 'Enter') return;
+    // 输入法组合期间按 Enter 是确认候选词（keyCode 229），不应触发搜索
+    if (event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    if (state.recursive) startRecursiveSearch();
+    else startFullSearch();
   });
   dom.recursiveToggle.addEventListener('click', toggleRecursiveSearch);
   dom.searchActionButton.addEventListener('click', handleSearchAction);
@@ -3679,6 +4003,7 @@ function bindEvents() {
     if (event.key === 'Escape') {
       if (state.editingPath) closePathEditor();
       else if (state.search.status === 'running') stopRecursiveSearch();
+      else if (state.fullSearch.status === 'running') stopFullSearch();
       else if (state.inspector.open) closeInspector();
       else if (dom.shell.classList.contains('sidebar-open')) closeSidebar();
       return;

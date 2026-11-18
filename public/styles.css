@@ -1052,6 +1052,17 @@ svg {
   color: var(--accent);
 }
 
+/* 输入内容尚未生效（需按 Enter 应用）时的提示态 */
+.search-field.is-pending {
+  border-color: rgba(94, 234, 212, 0.4);
+  background: rgba(13, 19, 29, 0.92);
+}
+
+.search-field.is-pending kbd {
+  border-color: rgba(94, 234, 212, 0.4);
+  color: var(--accent);
+}
+
 .search-banner {
   display: flex;
   align-items: center;
@@ -2446,6 +2457,14 @@ svg {
 .table-region.is-search-results .table-head,
 .table-region.is-search-results .file-row {
   grid-template-columns: 38px minmax(0, 1fr) 124px;
+}
+
+/* 当前层全量搜索进行中：行随分页不断重建，动画瞬时完成（0s）以避免整表闪烁。
+   不能用 animation: none——.file-row 基础样式是 opacity: 0，移除动画会丢失
+   row-in 的 forwards 填充，导致所有行停在透明状态、表格看起来是空的。 */
+.table-region.is-searching .file-row {
+  animation-duration: 0s;
+  animation-delay: 0s;
 }
 
 .table-region.is-search-results .size-column,
