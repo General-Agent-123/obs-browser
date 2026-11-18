@@ -143,10 +143,6 @@ OBS_AUTH_TOKEN=<一段足够长的随机字符串>
 
 > 口令走明文 HTTP 时可能被链路嗅探，公网访问建议在反向代理上再加一层 HTTPS。
 
-## 部署到服务器
-
-推流式部署（裸仓库 + `post-receive` 钩子 + systemd）的完整步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
-
 ## 功能
 
 - 地址栏面包屑、返回上级、手动输入任意 `obs://` 路径
