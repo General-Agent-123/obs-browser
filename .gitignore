@@ -9,3 +9,4 @@ node_modules/
 .playwright/
 .tmp/
 .playwright-mcp/
+*-current.png
