@@ -4,7 +4,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Readable, Transform } from 'node:stream';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzipSync } from 'node:zlib';
 import {
@@ -17,6 +17,7 @@ import { loadEnvFile } from './src/env.mjs';
 import { TrajectoryService } from './src/trajectory-service.mjs';
 import { objectPathFromReferer, rewriteHtmlRootUrls } from './src/trajectory.mjs';
 import { createAuth, parseFormBody, renderLoginPage, sanitizeNextTarget } from './src/auth.mjs';
+import { pipeBodyToResponse } from './src/stream.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnvFile(process.env.ENV_FILE || path.join(__dirname, '.env'));
@@ -595,12 +596,12 @@ async function serveTrajectoryFile(req, res, objectPath, requestPathname = '') {
   }
 
   res.writeHead(upstream.status === 206 ? 206 : 200, headers);
-  if (req.method === 'HEAD' || !upstream.body) {
+  if (req.method === 'HEAD') {
     await upstream.body?.cancel().catch(() => {});
     res.end();
     return;
   }
-  Readable.fromWeb(upstream.body).pipe(res);
+  await pipeBodyToResponse(res, upstream.body);
 }
 
 let versionInfo = { version: null, sdkVersion: null, platform: null };
@@ -1255,11 +1256,7 @@ const server = http.createServer(async (req, res) => {
       const length = upstream.headers.get('content-length');
       if (length) headers['Content-Length'] = length;
       res.writeHead(200, headers);
-      if (!upstream.body) {
-        res.end();
-        return;
-      }
-      Readable.fromWeb(upstream.body).pipe(res);
+      await pipeBodyToResponse(res, upstream.body);
       return;
     }
 
