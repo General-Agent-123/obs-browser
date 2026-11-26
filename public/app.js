@@ -3768,16 +3768,13 @@ function downloadLimit() {
   return state.meta?.downloadLimitBytes ?? DOWNLOAD_LIMIT_BYTES;
 }
 
-/** 生成用户在自己机器上执行的 obsutil 下载命令。 */
+/** 生成用户在自己机器上执行的 obsutil 下载命令（单行）。 */
 function buildObsutilCommand(entry) {
   const name = entry.name || entry.path.split('/').filter(Boolean).pop() || 'download';
   const source = entry.type === 'folder' ? entry.path.replace(/\/+$/, '') : entry.path;
   const flags = entry.type === 'folder' ? ' -r -f' : '';
   const quote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
-  return [
-    '# 从 OBS Explorer 复制；执行前需已配置 obsutil（obsutil config）',
-    `obsutil cp ${quote(source)} ${quote(`./${name}`)}${flags}`,
-  ].join('\n');
+  return `obsutil cp ${quote(source)} ${quote(`./${name}`)}${flags}`;
 }
 
 /** ≤50MB 文件走浏览器直连下载；大文件与文件夹改为复制 obsutil 命令。 */
