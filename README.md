@@ -97,6 +97,7 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 # 可选：目录总数统计的缓存与上限
 # OBS_COUNT_CACHE_MS=300000
 # OBS_COUNT_MAX_ENTRIES=100000
+# OBS_DOWNLOAD_MAX_BYTES=52428800
 ```
 
 `.env` 已加入 `.gitignore`，不要把它提交到仓库。
@@ -117,6 +118,7 @@ OBS_DEFAULT_PATH=obs://s3-asset-b-hd-cce-aifm-nlp-exp/task_data/261018/1018_fron
 | `OBS_BUCKET_CACHE_MS` | 桶列表缓存时长（毫秒），`0` 关闭 | `300000` |
 | `OBS_COUNT_CACHE_MS` | 目录总数缓存时长（毫秒），`0` 关闭 | `300000` |
 | `OBS_COUNT_MAX_ENTRIES` | 目录总数最多统计多少项，超出显示为 `≥N` | `100000` |
+| `OBS_DOWNLOAD_MAX_BYTES` | `/api/download` 代理下载的对象大小上限（字节），超过返回 413，页面会引导改用复制 obsutil 命令 | `52428800`（50 MB） |
 | `OBS_SEARCH_MAX_RESULTS` | 递归搜索最多返回结果数 | `300` |
 | `OBS_SEARCH_MAX_SCAN` | 递归搜索最多扫描对象数 | `20000` |
 | `OBS_SEARCH_MAX_PAGES` | 递归搜索最多请求页数 | `200` |

@@ -44,6 +44,12 @@ const MAX_UPLOAD_BYTES = clampNumber(
 );
 const BATCH_MAX_ITEMS = clampNumber(process.env.OBS_BATCH_MAX_ITEMS, 1, 1000, 200);
 const BATCH_CONCURRENCY = clampNumber(process.env.OBS_BATCH_CONCURRENCY, 1, 16, 4);
+const DOWNLOAD_MAX_BYTES = clampNumber(
+  process.env.OBS_DOWNLOAD_MAX_BYTES,
+  1_048_576,
+  1_099_511_627_776,
+  52_428_800,
+);
 const COUNT_MAX_ENTRIES = clampNumber(process.env.OBS_COUNT_MAX_ENTRIES, 1000, 1_000_000, 100_000);
 
 function clampNumber(value, min, max, fallback) {
@@ -1230,6 +1236,15 @@ const server = http.createServer(async (req, res) => {
       const stat = await obs.stat(objectPath);
       if (stat.type === 'folder') {
         fail(res, 400, '文件夹暂不支持直接下载');
+        return;
+      }
+      if ((stat.sizeBytes ?? 0) > DOWNLOAD_MAX_BYTES) {
+        const limitMb = Math.round(DOWNLOAD_MAX_BYTES / 1024 / 1024);
+        fail(
+          res,
+          413,
+          `对象大小 ${stat.sizeLabel ?? `${stat.sizeBytes}B`} 超过 ${limitMb} MB 代理下载上限，请在页面复制 obsutil 下载命令，或调大 OBS_DOWNLOAD_MAX_BYTES`,
+        );
         return;
       }
       const signedUrl = await obs.downloadUrl(objectPath, 300);
