@@ -644,6 +644,7 @@ const server = http.createServer(async (req, res) => {
         endpoint: runtime.endpoint || null,
         configMode: runtime.managed ? 'isolated' : 'default',
         uploadLimitBytes: MAX_UPLOAD_BYTES,
+        downloadLimitBytes: DOWNLOAD_MAX_BYTES,
         batchMaxItems: BATCH_MAX_ITEMS,
         authEnabled: AUTH.enabled,
         host: HOST,

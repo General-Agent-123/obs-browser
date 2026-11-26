@@ -2800,7 +2800,7 @@ function makeRow(entry, index) {
     actions.append(actionButton('open', '打开文件夹', 'chevronRight'));
     actions.append(actionButton('delete', '删除文件夹', 'trash'));
   } else {
-    const needsScript = (entry.sizeBytes ?? 0) > DOWNLOAD_LIMIT_BYTES;
+    const needsScript = (entry.sizeBytes ?? 0) > downloadLimit();
     actions.append(actionButton('preview', '预览对象', 'eye'));
     actions.append(actionButton('copy', '复制对象路径', 'copy'));
     actions.append(actionButton('download', needsScript ? '复制下载命令' : '下载对象', 'download'));
@@ -3233,7 +3233,7 @@ function renderInspector() {
   dom.previewPathText.textContent = entry.path;
   dom.previewPath.title = '复制对象路径';
 
-  const oversized = (stat?.sizeBytes ?? entry.sizeBytes ?? 0) > DOWNLOAD_LIMIT_BYTES;
+  const oversized = (stat?.sizeBytes ?? entry.sizeBytes ?? 0) > downloadLimit();
   if (oversized) {
     dom.downloadButton.dataset.mode = 'script';
     dom.downloadButton.removeAttribute('href');
@@ -3763,6 +3763,11 @@ function downloadEntry(entry) {
 
 const DOWNLOAD_LIMIT_BYTES = 50 * 1024 * 1024;
 
+/** 代理下载上限与 /api/meta 下发的 downloadLimitBytes（OBS_DOWNLOAD_MAX_BYTES）保持同步。 */
+function downloadLimit() {
+  return state.meta?.downloadLimitBytes ?? DOWNLOAD_LIMIT_BYTES;
+}
+
 /** 生成用户在自己机器上执行的 obsutil 下载命令。 */
 function buildObsutilCommand(entry) {
   const name = entry.name || entry.path.split('/').filter(Boolean).pop() || 'download';
@@ -3780,7 +3785,7 @@ function downloadOrCopyCommand(entry) {
   if (!entry) return;
   const oversized = entry.type !== 'folder'
     && entry.sizeBytes != null
-    && entry.sizeBytes > DOWNLOAD_LIMIT_BYTES;
+    && entry.sizeBytes > downloadLimit();
   if (entry.type === 'folder' || oversized) {
     copyText(buildObsutilCommand(entry), '下载命令已复制，粘贴到终端执行');
   } else {
