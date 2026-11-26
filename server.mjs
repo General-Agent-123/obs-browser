@@ -1240,10 +1240,11 @@ const server = http.createServer(async (req, res) => {
       }
       if ((stat.sizeBytes ?? 0) > DOWNLOAD_MAX_BYTES) {
         const limitMb = Math.round(DOWNLOAD_MAX_BYTES / 1024 / 1024);
+        const sizeMb = (stat.sizeBytes / 1048576).toFixed(1);
         fail(
           res,
           413,
-          `对象大小 ${stat.sizeLabel ?? `${stat.sizeBytes}B`} 超过 ${limitMb} MB 代理下载上限，请在页面复制 obsutil 下载命令，或调大 OBS_DOWNLOAD_MAX_BYTES`,
+          `对象大小 ${sizeMb} MB 超过 ${limitMb} MB 代理下载上限，请在页面复制 obsutil 下载命令，或调大 OBS_DOWNLOAD_MAX_BYTES`,
         );
         return;
       }
