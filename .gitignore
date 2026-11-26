@@ -10,3 +10,4 @@ node_modules/
 .tmp/
 .playwright-mcp/
 *-current.png
+.superpowers/
