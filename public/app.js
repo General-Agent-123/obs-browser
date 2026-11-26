@@ -2796,12 +2796,14 @@ function makeRow(entry, index) {
   if (isFolder) {
     actions.append(actionButton('copy', '复制文件夹路径', 'copy'));
     actions.append(actionButton('trajectory', '作为轨迹数据打开', 'trajectory'));
+    actions.append(actionButton('download', '复制下载命令', 'download'));
     actions.append(actionButton('open', '打开文件夹', 'chevronRight'));
     actions.append(actionButton('delete', '删除文件夹', 'trash'));
   } else {
+    const needsScript = (entry.sizeBytes ?? 0) > DOWNLOAD_LIMIT_BYTES;
     actions.append(actionButton('preview', '预览对象', 'eye'));
     actions.append(actionButton('copy', '复制对象路径', 'copy'));
-    actions.append(actionButton('download', '下载对象', 'download'));
+    actions.append(actionButton('download', needsScript ? '复制下载命令' : '下载对象', 'download'));
     actions.append(actionButton('delete', '删除对象', 'trash'));
   }
 
@@ -3209,7 +3211,9 @@ function closeInspector({ silent = false } = {}) {
   dom.inspector.setAttribute('aria-hidden', 'true');
   revealCurrentCrumb();
   dom.copyContentButton.hidden = true;
-  dom.downloadButton.href = '#';
+  dom.downloadButton.dataset.mode = 'direct';
+  dom.downloadButton.removeAttribute('href');
+  dom.downloadButton.innerHTML = `${svg('download')}下载对象`;
   updateSelection();
   if (!silent) dom.previewBody.scrollTop = 0;
 }
@@ -3229,7 +3233,16 @@ function renderInspector() {
   dom.previewPathText.textContent = entry.path;
   dom.previewPath.title = '复制对象路径';
 
-  dom.downloadButton.href = `/api/download?path=${encodeURIComponent(entry.path)}`;
+  const oversized = (stat?.sizeBytes ?? entry.sizeBytes ?? 0) > DOWNLOAD_LIMIT_BYTES;
+  if (oversized) {
+    dom.downloadButton.dataset.mode = 'script';
+    dom.downloadButton.removeAttribute('href');
+    dom.downloadButton.innerHTML = `${svg('copy')}复制下载命令`;
+  } else {
+    dom.downloadButton.dataset.mode = 'direct';
+    dom.downloadButton.href = `/api/download?path=${encodeURIComponent(entry.path)}`;
+    dom.downloadButton.innerHTML = `${svg('download')}下载对象`;
+  }
   dom.downloadButton.removeAttribute('aria-disabled');
   dom.copyObjectPathButton.disabled = false;
 
@@ -3748,6 +3761,33 @@ function downloadEntry(entry) {
   showToast('正在准备下载对象…');
 }
 
+const DOWNLOAD_LIMIT_BYTES = 50 * 1024 * 1024;
+
+/** 生成用户在自己机器上执行的 obsutil 下载命令。 */
+function buildObsutilCommand(entry) {
+  const name = entry.name || entry.path.split('/').filter(Boolean).pop() || 'download';
+  const source = entry.type === 'folder' ? entry.path.replace(/\/+$/, '') : entry.path;
+  const flags = entry.type === 'folder' ? ' -r -f' : '';
+  const quote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
+  return [
+    '# 从 OBS Explorer 复制；执行前需已配置 obsutil（obsutil config）',
+    `obsutil cp ${quote(source)} ${quote(`./${name}`)}${flags}`,
+  ].join('\n');
+}
+
+/** ≤50MB 文件走浏览器直连下载；大文件与文件夹改为复制 obsutil 命令。 */
+function downloadOrCopyCommand(entry) {
+  if (!entry) return;
+  const oversized = entry.type !== 'folder'
+    && entry.sizeBytes != null
+    && entry.sizeBytes > DOWNLOAD_LIMIT_BYTES;
+  if (entry.type === 'folder' || oversized) {
+    copyText(buildObsutilCommand(entry), '下载命令已复制，粘贴到终端执行');
+  } else {
+    downloadEntry(entry);
+  }
+}
+
 function loadStore(key) {
   try {
     const value = JSON.parse(localStorage.getItem(key) || '[]');
@@ -3910,6 +3950,11 @@ function bindEvents() {
       event.preventDefault();
       return;
     }
+    if (dom.downloadButton.dataset.mode === 'script') {
+      event.preventDefault();
+      copyText(buildObsutilCommand(state.inspector.entry), '下载命令已复制，粘贴到终端执行');
+      return;
+    }
     showToast('正在准备下载对象…');
   });
 
@@ -3939,7 +3984,7 @@ function bindEvents() {
     }
     const action = event.target.closest('[data-action]');
     if (action?.dataset.action === 'download' && state.inspector.entry) {
-      downloadEntry(state.inspector.entry);
+      downloadOrCopyCommand(state.inspector.entry);
     }
   });
 
@@ -4056,6 +4101,6 @@ function handleAction(action, row) {
   }
   else if (action === 'open' && entry.type === 'folder') loadPath(entry.path);
   else if (action === 'preview' && entry.type === 'file') openInspector(entry);
-  else if (action === 'download' && entry.type === 'file') downloadEntry(entry);
+  else if (action === 'download') downloadOrCopyCommand(entry);
   else if (action === 'delete') openDeleteModal(entry);
 }
